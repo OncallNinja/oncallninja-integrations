@@ -4,7 +4,7 @@ version = "0.1.0"
 description = ""
 authors = [ "hello@oncallninja.com"]
 readme = "README.md"
-packages = [{ include = "oncallninja-integrations" }]
+packages = [{ include = "oncallninja_integrations" }]
 
 [tool.poetry.dependencies]
 python = ">=3.12"
