@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "oncallninja-integrations"
+version = "0.1.0"
+description = ""
+authors = [ "hello@oncallninja.com"]
+readme = "README.md"
+packages = [{ include = "oncallninja-integrations" }]
+
+[tool.poetry.dependencies]
+python = ">=3.12"
+launchdarkly-server-sdk = ">=9.9.0,<10.0.0"
+requests = "^2.32.3"
+pydantic = "^2.10.6"
+google-cloud-secret-manager = "^2.23.1"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
