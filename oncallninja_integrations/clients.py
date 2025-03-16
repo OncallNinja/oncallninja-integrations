@@ -28,18 +28,18 @@ def get_bitbucket_client():
         return BitbucketClient(BitbucketConfig(access_token=api_key))
     return None
 
-def get_slack_client():
+def get_slack_client(redact_text = None, redact_message_blocks = None):
     slack_token = secret_manager.get_secret("slack-bot-token")
     if slack_token:
-        return SlackClient(slack_token)
+        return SlackClient(slack_token, redact_text = None, redact_message_blocks = None)
     return None
 
-def fetch_resource(resource_type: str, action: str, params: dict[str: Any]):
+def fetch_resource(resource_type: str, action: str, params: dict[str: Any], redact_text = None, redact_message_blocks = None):
     """Fetch resource from connected services"""
     bitbucket_client = get_bitbucket_client()
     launchdarkly_client = get_launchdarkly_client()
     kibana_client = get_kibana_client()
-    slack_client = get_slack_client()
+    slack_client = get_slack_client(redact_text, redact_message_blocks)
 
     if resource_type == "code" and bitbucket_client:
         return bitbucket_client.execute_action(action, params)

@@ -6,11 +6,9 @@ from slack_sdk.errors import SlackApiError
 from datetime import datetime, timedelta
 
 from .action_router import ActionRouter, action
-from redactor.redact import redact_text, redact_message_blocks
-
 
 class SlackClient(ActionRouter):
-    def __init__(self, slack_token: str):
+    def __init__(self, slack_token: str, redact_text = None, redact_message_blocks = None):
         """
         Initialize the LaunchDarkly integration with your API key.
 
@@ -24,6 +22,8 @@ class SlackClient(ActionRouter):
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
+        self.redact_text = redact_text
+        self.redact_message_blocks = redact_message_blocks
 
         # Slack client initialization with custom SSL handling
         self.slack_client = WebClient(
@@ -46,12 +46,15 @@ class SlackClient(ActionRouter):
         return all_channels
 
     def _redact(self, message):
+        if not self.redact_text:
+            return message
+
         text = message.get("text")
-        redacted_text = redact_text(text)['redacted_text']
+        redacted_text = self.redact_text(text)
         message["text"] = redacted_text
         blocks = message.get('blocks', '')
         if blocks:
-            redacted_blocks = redact_message_blocks(blocks)
+            redacted_blocks = self.redact_message_blocks(blocks)
             message["blocks"] = redacted_blocks
         return message
 
