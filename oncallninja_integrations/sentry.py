@@ -639,7 +639,7 @@ class SentryAPIClient(ActionRouter):
 
 
 # if __name__=="__main__":
-#     sentry_client = SentryAPIClient(auth_token="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",
+#     sentry_client = SentryAPIClient(auth_token="",
 #                                     organization_slug="oncallninja")
 #
 #     from datetime import datetime, timedelta
