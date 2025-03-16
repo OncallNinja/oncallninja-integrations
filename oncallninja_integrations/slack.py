@@ -5,7 +5,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from datetime import datetime, timedelta
 
-from integrations.action_router import ActionRouter, action
+from .action_router import ActionRouter, action
 from redactor.redact import redact_text, redact_message_blocks
 
 

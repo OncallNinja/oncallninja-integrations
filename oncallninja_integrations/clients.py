@@ -1,10 +1,10 @@
 from typing import Any
 
-from bitbucket import BitbucketClient, BitbucketConfig
-from kibana import KibanaClient
-from launchdarkly import LaunchDarklyClient
-from secret_manager import SecretManager
-from slack import SlackClient
+from .bitbucket import BitbucketClient, BitbucketConfig
+from .kibana import KibanaClient
+from .launchdarkly import LaunchDarklyClient
+from .secret_manager import SecretManager
+from .slack import SlackClient
 
 secret_manager = SecretManager()
 
