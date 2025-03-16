@@ -47,7 +47,9 @@ class AWSOpenSearchClient(ActionRouter):
         Returns:
             API response as dictionary
         """
-        data['rawPath'] = f"{self.opensearch_base_url}/{endpoint.lstrip('/')}"
+        endpoint = endpoint.lstrip('/')
+        data['rawPath'] = f"/{endpoint}"
+        print(f"Calling endpoint {self.opensearch_base_url}/{endpoint}")
         try:
             response = requests.request(
                 method=method,
@@ -84,8 +86,9 @@ class AWSOpenSearchClient(ActionRouter):
         # headers = self.headers.copy()
         # headers["osd-xsrf"] = "true"  # OpenSearch Dashboards uses osd-xsrf instead of kbn-xsrf
 
-        data['rawPath'] = f'/api/{endpoint.lstrip('/')}'
-        data['dashboard'] = True
+        endpoint = endpoint.lstrip('/')
+        data['rawPath'] = f'/api/{endpoint}'
+        print(f"Calling endpoint {self.opensearch_base_url}/api/{endpoint}")
         try:
             response = requests.request(
                 method=method,
