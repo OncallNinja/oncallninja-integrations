@@ -1,11 +1,8 @@
 import requests
-import json
 from typing import Dict, List, Optional, Union
-from datetime import datetime, timedelta
-import urllib.parse
-import base64
-import boto3
-from requests_aws4auth import AWS4Auth
+from datetime import datetime
+from google.auth.transport.requests import Request as GoogleRequest
+from google.oauth2 import id_token
 
 from .action_router import action, ActionRouter
 
@@ -13,16 +10,8 @@ from .action_router import action, ActionRouter
 class AWSOpenSearchClient(ActionRouter):
     def __init__(
             self,
-            region: str,
             domain_endpoint: str,
-            opensearch_endpoint: Optional[str] = None,
-            dashboard_endpoint: Optional[str] = None,
-            aws_access_key: Optional[str] = None,
-            aws_secret_key: Optional[str] = None,
-            aws_session_token: Optional[str] = None,
-            iam_role_arn: Optional[str] = None,
-            username: Optional[str] = None,
-            password: Optional[str] = None
+            audience: str,
     ):
         """
         Initialize AWS OpenSearch Service interface
@@ -32,62 +21,16 @@ class AWSOpenSearchClient(ActionRouter):
             domain_endpoint: AWS OpenSearch domain endpoint
             opensearch_endpoint: Direct OpenSearch URL (optional, will be derived from domain)
             dashboard_endpoint: Direct OpenSearch Dashboards URL (optional, will be derived from domain)
-            aws_access_key: AWS access key for IAM authentication
-            aws_secret_key: AWS secret key for IAM authentication
-            aws_session_token: AWS session token for temporary credentials
             iam_role_arn: IAM role ARN to assume for authentication
-            username: Username for basic authentication (if using fine-grained access control)
-            password: Password for basic authentication (if using fine-grained access control)
         """
-        self.region = region
         self.domain_endpoint = domain_endpoint.rstrip('/')
 
         # Set up base URLs
-        self.opensearch_base_url = opensearch_endpoint or self.domain_endpoint
-        self.dashboards_base_url = dashboard_endpoint or f"{self.domain_endpoint}/_dashboards"
+        self.opensearch_base_url = self.domain_endpoint
 
         # Set up headers
-        self.headers = {
-            "Content-Type": "application/json"
-        }
-
-        # Set up authentication
-        self.auth = None
-
-        # Basic auth (for fine-grained access control)
-        if username and password:
-            self.auth = (username, password)
-
-        # IAM auth
-        elif aws_access_key and aws_secret_key:
-            # If using IAM role, assume the role
-            if iam_role_arn:
-                sts_client = boto3.client(
-                    'sts',
-                    region_name=region,
-                    aws_access_key_id=aws_access_key,
-                    aws_secret_access_key=aws_secret_key,
-                    aws_session_token=aws_session_token
-                )
-
-                assumed_role = sts_client.assume_role(
-                    RoleArn=iam_role_arn,
-                    RoleSessionName="OpenSearchSession"
-                )
-
-                credentials = assumed_role['Credentials']
-                aws_access_key = credentials['AccessKeyId']
-                aws_secret_key = credentials['SecretAccessKey']
-                aws_session_token = credentials['SessionToken']
-
-            # Create AWS4Auth for request signing
-            self.aws_auth = AWS4Auth(
-                aws_access_key,
-                aws_secret_key,
-                region,
-                'es',  # OpenSearch still uses 'es' service name for signing
-                session_token=aws_session_token
-            )
+        self.headers = {'Authorization': f'Bearer {id_token.fetch_id_token(GoogleRequest(), audience)}',
+                        "Content-Type": "application/json"}
 
         super().__init__()
 
@@ -104,19 +47,15 @@ class AWSOpenSearchClient(ActionRouter):
         Returns:
             API response as dictionary
         """
-        url = f"{self.opensearch_base_url}/{endpoint.lstrip('/')}"
-
-        # Determine which auth to use
-        request_auth = self.aws_auth if hasattr(self, 'aws_auth') else self.auth
-
+        data['rawPath'] = f"{self.opensearch_base_url}/{endpoint.lstrip('/')}"
         try:
             response = requests.request(
                 method=method,
-                url=url,
+                url=self.opensearch_base_url,
                 headers=self.headers,
-                json=data,
-                auth=request_auth
+                json=data
             )
+            print(f"Response status: {response.status_code}")
             response.raise_for_status()
             return response.json() if response.text else {}
         except requests.exceptions.RequestException as e:
@@ -124,6 +63,7 @@ class AWSOpenSearchClient(ActionRouter):
             error_msg = f"API request failed: {str(e)}"
             if hasattr(e, 'response') and e.response is not None:
                 error_msg += f" - Response: {e.response.text}"
+            print(error_msg)
             raise Exception(error_msg)
 
     @action(description="DASHBOARDS: Make HTTP request.")
@@ -139,22 +79,19 @@ class AWSOpenSearchClient(ActionRouter):
         Returns:
             API response as dictionary
         """
-        url = f"{self.dashboards_base_url}/api/{endpoint.lstrip('/')}"
 
         # For dashboard API requests, add XSRF header
-        headers = self.headers.copy()
-        headers["osd-xsrf"] = "true"  # OpenSearch Dashboards uses osd-xsrf instead of kbn-xsrf
+        # headers = self.headers.copy()
+        # headers["osd-xsrf"] = "true"  # OpenSearch Dashboards uses osd-xsrf instead of kbn-xsrf
 
-        # Determine which auth to use
-        request_auth = self.aws_auth if hasattr(self, 'aws_auth') else self.auth
-
+        data['rawPath'] = f'/api/{endpoint.lstrip('/')}'
+        data['dashboard'] = True
         try:
             response = requests.request(
                 method=method,
-                url=url,
-                headers=headers,
-                json=data,
-                auth=request_auth
+                url=self.opensearch_base_url,
+                headers=self.headers,
+                json=data
             )
             response.raise_for_status()
             return response.json() if response.text else {}
