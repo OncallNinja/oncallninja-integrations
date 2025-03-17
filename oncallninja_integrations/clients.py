@@ -5,6 +5,7 @@ from .kibana import KibanaClient
 from .launchdarkly import LaunchDarklyClient
 from .secret_manager import SecretManager
 from .slack import SlackClient
+from .opensearch import AWSOpenSearchClient
 
 secret_manager = SecretManager()
 
@@ -34,19 +35,34 @@ def get_slack_client(redact_text = None, redact_message_blocks = None):
         return SlackClient(slack_token, redact_text = None, redact_message_blocks = None)
     return None
 
+def get_opensearch_client(): 
+    try:
+        client = AWSOpenSearchClient(
+            domain_endpoint=secret_manager.get_secret("opensearch-proxy-endpoint"),
+            audience=os.getenv("SERVICE_URL")
+        )
+        return client
+    except:
+        return None
+
 def fetch_resource(resource_type: str, action: str, params: dict[str: Any], redact_text = None, redact_message_blocks = None):
     """Fetch resource from connected services"""
     bitbucket_client = get_bitbucket_client()
     launchdarkly_client = get_launchdarkly_client()
     kibana_client = get_kibana_client()
     slack_client = get_slack_client(redact_text, redact_message_blocks)
+    opensearch_client = get_opensearch_client()
+
 
     if resource_type == "code" and bitbucket_client:
         return bitbucket_client.execute_action(action, params)
     elif resource_type == "featureflag" and launchdarkly_client:
         return launchdarkly_client.execute_action(action, params)
-    elif resource_type == "logs" and kibana_client:
-        return kibana_client.execute_action(action, params)
+    elif resource_type == "logs":
+        if kibana_client:
+            return kibana_client.execute_action(action, params)
+        if opensearch_client:
+            return opensearch_client.execute_action(action, params)
     elif resource_type == "slack" and slack_client:
         return slack_client.execute_action(action, params)
     else:
