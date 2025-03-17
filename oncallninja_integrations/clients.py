@@ -74,11 +74,15 @@ def get_actions():
     bitbucket_client = get_bitbucket_client()
     launchdarkly_client = get_launchdarkly_client()
     kibana_client = get_kibana_client()
+    opensearch_client = get_opensearch_client()
+
     if bitbucket_client:
         all_actions.append({"code": bitbucket_client.available_actions()})
     if launchdarkly_client is not None:
         all_actions.append({"featureflag": launchdarkly_client.available_actions()})
     if kibana_client is not None:
         all_actions.append({"logs": kibana_client.available_actions()})
+    if opensearch_client is not None: 
+        all_actions.append({"logs": opensearch_client.available_actions()})
 
     return all_actions
