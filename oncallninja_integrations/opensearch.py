@@ -1,8 +1,11 @@
 import requests
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Tuple
 from datetime import datetime
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2 import id_token
+from requests_aws4auth import AWS4Auth
+import re
+import json
 
 from .action_router import action, ActionRouter
 
@@ -11,28 +14,111 @@ class AWSOpenSearchClient(ActionRouter):
     def __init__(
             self,
             domain_endpoint: str,
-            audience: str,
+            auth_method: Optional[str] = None,
+            aws_access_key: Optional[str] = None,
+            aws_secret_key: Optional[str] = None,
+            audience: Optional[str] = None,
     ):
         """
         Initialize AWS OpenSearch Service interface
 
         Args:
-            region: AWS region where the OpenSearch domain is deployed
             domain_endpoint: AWS OpenSearch domain endpoint
-            opensearch_endpoint: Direct OpenSearch URL (optional, will be derived from domain)
-            dashboard_endpoint: Direct OpenSearch Dashboards URL (optional, will be derived from domain)
-            iam_role_arn: IAM role ARN to assume for authentication
+            auth_method: Authentication method ('aws', 'google', or None)
+            aws_access_key: AWS access key for AWS authentication
+            aws_secret_key: AWS secret key for AWS authentication
+            audience: Audience for Google authentication
         """
         self.domain_endpoint = domain_endpoint.rstrip('/')
-
-        # Set up base URLs
         self.opensearch_base_url = self.domain_endpoint
-
-        # Set up headers
-        self.headers = {'Authorization': f'Bearer {id_token.fetch_id_token(GoogleRequest(), audience)}',
-                        "Content-Type": "application/json"}
+        
+        # Extract region from domain endpoint for AWS auth
+        region_match = re.search(r'\.([^.]+)\.es\.amazonaws\.com', domain_endpoint)
+        self.region = region_match.group(1) if region_match else None
+        
+        # Store auth credentials
+        self.auth_method = auth_method
+        self.aws_access_key = aws_access_key
+        self.aws_secret_key = aws_secret_key
+        self.audience = audience
+        
+        # Auto-detect auth method if not specified
+        if self.auth_method is None:
+            if aws_access_key and aws_secret_key:
+                self.auth_method = "aws"
+            elif audience:
+                self.auth_method = "google"
 
         super().__init__()
+
+    def _setup_auth(self) -> Tuple[Dict[str, str], Optional[AWS4Auth]]:
+        """
+        Set up authentication headers and auth object based on the selected method
+        
+        Returns:
+            Tuple of (headers, auth_object)
+        """
+        base_headers = {"Content-Type": "application/json"}
+        
+        if self.auth_method == "aws":
+            if not all([self.aws_access_key, self.aws_secret_key, self.region]):
+                raise ValueError("AWS authentication requires access_key, secret_key, and a valid domain in a region")
+            # AWS Signature v4 auth
+            auth = AWS4Auth(
+                self.aws_access_key,
+                self.aws_secret_key,
+                self.region,
+                'es'
+            )
+            return base_headers, auth
+            
+        elif self.auth_method == "google":
+            if not self.audience:
+                raise ValueError("Google authentication requires an audience")
+            # Google ID token
+            token = id_token.fetch_id_token(GoogleRequest(), self.audience)
+            headers = base_headers.copy()
+            headers['Authorization'] = f'Bearer {token}'
+            return headers, None
+            
+        return base_headers, None
+
+    def _find_timestamp_field(self, index_pattern: str) -> str:
+        """
+        Find the timestamp field in the index mapping
+        
+        Args:
+            index_pattern: Index pattern to check
+            
+        Returns:
+            Name of the timestamp field
+        """
+        response = self._make_opensearch_request("GET", f"{index_pattern}/_mapping")
+        
+        # Look for common timestamp field patterns
+        timestamp_patterns = [
+            "@timestamp",
+            "timestamp",
+            "time",
+            "created_at",
+            "date"
+        ]
+        
+        for index, mapping in response.items():
+            properties = mapping.get("mappings", {}).get("properties", {})
+            
+            # First pass: look for exact matches with date type
+            for field, field_info in properties.items():
+                if field_info.get("type") == "date":
+                    if field in timestamp_patterns:
+                        return field
+            
+            # Second pass: any field of type date
+            for field, field_info in properties.items():
+                if field_info.get("type") == "date":
+                    return field
+        
+        raise ValueError(f"No timestamp field found in index {index_pattern}")
 
     @action(description="OPENSEARCH: Make HTTP request.")
     def _make_opensearch_request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
@@ -51,10 +137,12 @@ class AWSOpenSearchClient(ActionRouter):
         url = f"{self.opensearch_base_url}/{endpoint}"
 
         try:
+            headers, auth = self._setup_auth()
             response = requests.request(
                 method=method,
                 url=url,
-                headers=self.headers,
+                headers=headers,
+                auth=auth,
                 json=data
             )
             response.raise_for_status()
@@ -82,15 +170,16 @@ class AWSOpenSearchClient(ActionRouter):
         endpoint = endpoint.lstrip('/')
         url = f"{self.dashboards_base_url}/api/{endpoint}"
 
-        # For dashboard API requests, add XSRF header
-        headers = self.headers.copy()
-        headers["osd-xsrf"] = "true"  # OpenSearch Dashboards uses osd-xsrf instead of kbn-xsrf
-
         try:
+            headers, auth = self._setup_auth()
+            # For dashboard API requests, add XSRF header
+            headers["osd-xsrf"] = "true"  # OpenSearch Dashboards uses osd-xsrf instead of kbn-xsrf
+            
             response = requests.request(
                 method=method,
                 url=url,
                 headers=headers,
+                auth=auth,
                 json=data,
             )
             response.raise_for_status()
@@ -138,7 +227,7 @@ class AWSOpenSearchClient(ActionRouter):
         """
         return self._make_dashboards_request("GET", f"spaces/space/{space_id}")
 
-    @action(description="OPENSEARCH: Get logs. Supply a index_pattern, start_time and end_time, and optional filters")
+    @action(description="OPENSEARCH: Get logs with automatic timestamp field detection")
     def get_logs(
             self,
             index_pattern: str,
@@ -146,7 +235,7 @@ class AWSOpenSearchClient(ActionRouter):
             end_time: Union[str, datetime],
             filters: Optional[Dict] = None,
             size: int = 100,
-            sort_field: str = "@timestamp",
+            sort_field: Optional[str] = None,
             sort_order: str = "desc"
     ) -> Dict:
         """
@@ -158,17 +247,15 @@ class AWSOpenSearchClient(ActionRouter):
             end_time: End time (ISO format string or datetime object)
             filters: Dictionary of filters to apply
             size: Number of results to return
-            sort_field: Field to sort by
+            sort_field: Field to sort by (if None, uses detected timestamp field)
             sort_order: Sort order ('asc' or 'desc')
 
         Returns:
             Dictionary containing matching logs
         """
-        # Ensure proper mapping exists
-        try:
-            self._ensure_timestamp_mapping(index_pattern)
-        except Exception as e:
-            print(f"Warning: Could not ensure mapping: {str(e)}")
+        # Find the timestamp field
+        timestamp_field = self._find_timestamp_field(index_pattern)
+        
         # Convert datetime objects to ISO format if needed
         if isinstance(start_time, datetime):
             start_time = start_time.isoformat()
@@ -181,7 +268,7 @@ class AWSOpenSearchClient(ActionRouter):
                 "must": [
                     {
                         "range": {
-                            "@timestamp": {
+                            timestamp_field: {
                                 "gte": start_time,
                                 "lte": end_time
                             }
@@ -216,6 +303,9 @@ class AWSOpenSearchClient(ActionRouter):
                         }
                     })
 
+        # Use detected timestamp field for sorting if not specified
+        sort_field = sort_field or timestamp_field
+
         payload = {
             "query": query,
             "size": size,
@@ -228,7 +318,6 @@ class AWSOpenSearchClient(ActionRouter):
             ]
         }
 
-        # For logs we query OpenSearch directly
         return self._make_opensearch_request("POST", f"{index_pattern}/_search", payload)
 
     @action(description="OPENSEARCH: Get available fields in an index pattern")
@@ -253,22 +342,6 @@ class AWSOpenSearchClient(ActionRouter):
                     fields.append(field)
 
         return sorted(fields)
-
-    def _ensure_timestamp_mapping(self, index_pattern: str) -> None:
-        """
-        Internal method to ensure the @timestamp field is properly mapped in the index.
-        
-        Args:
-            index_pattern: Index pattern to check/update
-        """
-        mapping = {
-            "properties": {
-                "@timestamp": {
-                    "type": "date"
-                }
-            }
-        }
-        self.create_index_mapping(index_pattern, mapping)
 
     def _extract_fields_from_properties(self, properties, parent=""):
         """
@@ -315,8 +388,7 @@ class AWSOpenSearchClient(ActionRouter):
         response = self._make_opensearch_request("POST", f"{index_pattern}/_search", payload)
         return [bucket["key"] for bucket in response.get("aggregations", {}).get("log_levels", {}).get("buckets", [])]
 
-    @action(
-        description="OPENSEARCH: search logs in a particular index pattern with a keyword and start_time and end_time")
+    @action(description="OPENSEARCH: search logs in a particular index pattern with a keyword and start_time and end_time")
     def search_logs_by_keyword(
             self,
             index_pattern: str,
@@ -340,6 +412,9 @@ class AWSOpenSearchClient(ActionRouter):
         Returns:
             Dictionary containing matching logs
         """
+        # Find the timestamp field
+        timestamp_field = self._find_timestamp_field(index_pattern)
+        
         # Convert datetime objects to ISO format if needed
         if isinstance(start_time, datetime):
             start_time = start_time.isoformat()
@@ -350,7 +425,7 @@ class AWSOpenSearchClient(ActionRouter):
         must_clauses = [
             {
                 "range": {
-                    "@timestamp": {
+                    timestamp_field: {
                         "gte": start_time,
                         "lte": end_time
                     }
@@ -384,7 +459,7 @@ class AWSOpenSearchClient(ActionRouter):
             "size": size,
             "sort": [
                 {
-                    "@timestamp": {
+                    timestamp_field: {
                         "order": "desc"
                     }
                 }
@@ -444,3 +519,36 @@ class AWSOpenSearchClient(ActionRouter):
         """
         response = self._make_opensearch_request("GET", "_cat/indices?format=json")
         return [index["index"] for index in response]
+
+    @action(description="OPENSEARCH: Write test logs")
+    def write_log(
+        self,
+        index_name: str,
+        log_entry: Dict,
+        timestamp_field: Optional[str] = None
+    ) -> Dict:
+        """
+        Write a single log entry to OpenSearch
+        
+        Args:
+            index_name: Name of the index to write to
+            log_entry: Log entry to write
+            timestamp_field: Name of timestamp field (if None, will be auto-detected)
+        """
+        # Try to get timestamp field from index, or use default
+        try:
+            if timestamp_field is None:
+                timestamp_field = self._find_timestamp_field(index_name)
+        except ValueError:
+            timestamp_field = "@timestamp"  # fallback to default
+        
+        # Add timestamp if not present
+        if timestamp_field not in log_entry:
+            log_entry[timestamp_field] = datetime.now().isoformat()
+        
+        # Use the index API
+        return self._make_opensearch_request(
+            "POST",
+            f"{index_name}/_doc",
+            data=log_entry
+        )
