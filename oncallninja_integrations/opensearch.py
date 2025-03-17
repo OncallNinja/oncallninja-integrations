@@ -48,16 +48,15 @@ class AWSOpenSearchClient(ActionRouter):
             API response as dictionary
         """
         endpoint = endpoint.lstrip('/')
-        data['rawPath'] = f"/{endpoint}"
-        print(f"Calling endpoint {self.opensearch_base_url}/{endpoint}")
+        url = f"{self.opensearch_base_url}/{endpoint}"
+
         try:
             response = requests.request(
                 method=method,
-                url=self.opensearch_base_url,
-                json=data,
-                headers=self.headers
+                url=url,
+                headers=self.headers,
+                json=data
             )
-            print(f"Response status: {response.status_code}")
             response.raise_for_status()
             return response.json() if response.text else {}
         except requests.exceptions.RequestException as e:
@@ -65,7 +64,6 @@ class AWSOpenSearchClient(ActionRouter):
             error_msg = f"API request failed: {str(e)}"
             if hasattr(e, 'response') and e.response is not None:
                 error_msg += f" - Response: {e.response.text}"
-            print(error_msg)
             raise Exception(error_msg)
 
     @action(description="DASHBOARDS: Make HTTP request.")
@@ -81,20 +79,19 @@ class AWSOpenSearchClient(ActionRouter):
         Returns:
             API response as dictionary
         """
+        endpoint = endpoint.lstrip('/')
+        url = f"{self.dashboards_base_url}/api/{endpoint}"
 
         # For dashboard API requests, add XSRF header
-        # headers = self.headers.copy()
+        headers = self.headers.copy()
         headers["osd-xsrf"] = "true"  # OpenSearch Dashboards uses osd-xsrf instead of kbn-xsrf
 
-        endpoint = endpoint.lstrip('/')
-        data['rawPath'] = f'/api/{endpoint}'
-        print(f"Calling endpoint {self.opensearch_base_url}/api/{endpoint}")
         try:
             response = requests.request(
                 method=method,
-                url=self.opensearch_base_url,
+                url=url,
+                headers=headers,
                 json=data,
-                headers=self.headers
             )
             response.raise_for_status()
             return response.json() if response.text else {}
