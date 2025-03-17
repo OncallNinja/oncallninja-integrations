@@ -38,6 +38,7 @@ def get_slack_client(redact_text = None, redact_message_blocks = None):
 def get_opensearch_client(): 
     try:
         client = AWSOpenSearchClient(
+            auth_method='google',
             domain_endpoint=secret_manager.get_secret("opensearch-proxy-endpoint"),
             audience=os.getenv("SERVICE_URL")
         )
