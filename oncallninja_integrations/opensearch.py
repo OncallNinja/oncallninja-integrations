@@ -164,6 +164,11 @@ class AWSOpenSearchClient(ActionRouter):
         Returns:
             Dictionary containing matching logs
         """
+        # Ensure proper mapping exists
+        try:
+            self._ensure_timestamp_mapping(index_pattern)
+        except Exception as e:
+            print(f"Warning: Could not ensure mapping: {str(e)}")
         # Convert datetime objects to ISO format if needed
         if isinstance(start_time, datetime):
             start_time = start_time.isoformat()
@@ -248,6 +253,22 @@ class AWSOpenSearchClient(ActionRouter):
                     fields.append(field)
 
         return sorted(fields)
+
+    def _ensure_timestamp_mapping(self, index_pattern: str) -> None:
+        """
+        Internal method to ensure the @timestamp field is properly mapped in the index.
+        
+        Args:
+            index_pattern: Index pattern to check/update
+        """
+        mapping = {
+            "properties": {
+                "@timestamp": {
+                    "type": "date"
+                }
+            }
+        }
+        self.create_index_mapping(index_pattern, mapping)
 
     def _extract_fields_from_properties(self, properties, parent=""):
         """
@@ -391,6 +412,27 @@ class AWSOpenSearchClient(ActionRouter):
             Dashboards status information
         """
         return self._make_dashboards_request("GET", "status")
+
+    @action(description="OPENSEARCH: Create or update index mapping")
+    def create_index_mapping(self, index: str, mapping: Dict) -> Dict:
+        """
+        Create or update an index mapping in OpenSearch.
+
+        Args:
+            index: Name of the index
+            mapping: Mapping configuration
+
+        Returns:
+            API response
+        """
+        # Check if index exists
+        try:
+            self._make_opensearch_request("HEAD", index)
+            # If index exists, update mapping
+            return self._make_opensearch_request("PUT", f"{index}/_mapping", mapping)
+        except Exception:
+            # If index doesn't exist, create it with mapping
+            return self._make_opensearch_request("PUT", index, {"mappings": mapping})
 
     @action(description="OPENSEARCH: Check all available indexes.")
     def get_indices(self) -> List[str]:
