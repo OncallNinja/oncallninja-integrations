@@ -443,10 +443,12 @@ class AWSOpenSearchClient(ActionRouter):
                 }
             })
         else:
-            # Perform full-text search
+            # Perform partial matching with wildcards
             must_clauses.append({
                 "query_string": {
-                    "query": keyword
+                    "query": f"*{keyword}*",
+                    "analyze_wildcard": True,
+                    "fields": ["*"]
                 }
             })
 
