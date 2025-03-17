@@ -59,8 +59,8 @@ def fetch_resource(resource_type: str, action: str, params: dict[str: Any], reda
     elif resource_type == "featureflag" and launchdarkly_client:
         return launchdarkly_client.execute_action(action, params)
     elif resource_type == "logs":
-        if kibana_client:
-            return kibana_client.execute_action(action, params)
+        # if kibana_client:
+        #     return kibana_client.execute_action(action, params)
         if opensearch_client:
             return opensearch_client.execute_action(action, params)
     elif resource_type == "slack" and slack_client:
