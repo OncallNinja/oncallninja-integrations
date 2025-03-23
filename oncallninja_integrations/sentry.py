@@ -578,32 +578,45 @@ class SentryAPIClient(ActionRouter):
 
         # Build a formatted stack trace string
         formatted_trace = []
+        
+        # Add header information
         formatted_trace.append(f"Stack Trace for Event: {stack_trace_data.get('event_id')}")
         formatted_trace.append(f"Project: {stack_trace_data.get('project_slug')}")
 
-        if "exception_type" in stack_trace_data:
+        if "exception_type" in stack_trace_data and "exception_value" in stack_trace_data:
             formatted_trace.append(
-                f"Exception: {stack_trace_data.get('exception_type')}: {stack_trace_data.get('exception_value')}")
+                f"Exception: {stack_trace_data.get('exception_type')}: {stack_trace_data.get('exception_value')}\n")
 
-        formatted_trace.append("\nStack frames (most recent call last):")
+        formatted_trace.append("Stack frames (most recent call last):")
 
         # Reverse the frames to show most recent call last (Python standard)
         for i, frame in enumerate(reversed(frames)):
             filename = frame.get("filename", "unknown")
             function = frame.get("function", "unknown")
             line_no = frame.get("lineNo", "?")
-
-            # Extract context if available
-            context_lines = frame.get("context", [])
-            context_str = ""
-            if context_lines:
-                for line_num, code_line in context_lines:
-                    if line_num == line_no:
-                        context_str = f"\n    {code_line.strip()}"
-                        break
-
-            frame_str = f"{i + 1}. {filename}:{line_no}, in {function}{context_str}"
+            col_no = frame.get("colNo", "?")
+            
+            # Add frame header with detailed information
+            frame_str = f"\n{i + 1}. File: {filename}, Line: {line_no}, Column: {col_no}"
+            frame_str += f"\n   Function: {function}"
             formatted_trace.append(frame_str)
+            
+            # Extract and format context if available
+            context_lines = frame.get("context", [])
+            if context_lines:
+                formatted_trace.append("\n   Context:")
+                
+                # Find the error line to determine proper padding for line numbers
+                max_line_num = max([line_num for line_num, _ in context_lines]) if context_lines else 0
+                padding = len(str(max_line_num))
+                
+                # Format each context line with proper indentation and highlighting for the error line
+                for line_num, code_line in context_lines:
+                    # Determine if this is the error line
+                    prefix = "-> " if line_num == line_no else "   "
+                    # Format line with consistent padding for line numbers
+                    formatted_line = f"   {prefix}{str(line_num).rjust(padding)}: {code_line}"
+                    formatted_trace.append(formatted_line)
 
         return "\n".join(formatted_trace)
 
