@@ -12,7 +12,7 @@ from .action_router import action
 from .code_client import CodingClient
 
 class BitbucketConfig(BaseModel):
-    access_token: str = Field(..., description="Bitbucket access token")
+    access_tokens: Dict[str, str] = Field(..., description="Map of repository names to their Bitbucket access tokens")
     api_url: str = Field("https://api.bitbucket.org/2.0", description="Bitbucket API URL")
     work_dir: str = Field("/tmp/oncallninja-repos", description="Working directory for cloning repos")
     max_commits_to_analyze: int = Field(10, description="Maximum number of recent commits to analyze")
@@ -22,33 +22,48 @@ class BitbucketClient(CodingClient):
         super().__init__(config.work_dir)
         self.logger = logging.getLogger(__name__)
         self.config = config
-        # Bitbucket uses Basic Auth with username and app password
-        self.headers = {
-            "Authorization": f"Bearer {config.access_token}",
-            "Accept": "application/json"
-        }
+        self.tokens = config.access_tokens
+        # Initialize with empty headers, will be set per request
+        self.headers = {"Accept": "application/json"}
         os.makedirs(self.config.work_dir, exist_ok=True)
 
+    def _get_token_for_repo(self, repo_name: str) -> str:
+        """Get the access token for a specific repository."""
+        if repo_name not in self.tokens:
+            raise ValueError(f"No access token found for repository: {repo_name}")
+        return self.tokens[repo_name]
+
+    def _get_headers_for_repo(self, repo_name: str) -> Dict[str, str]:
+        """Get headers with appropriate token for a repository."""
+        token = self._get_token_for_repo(repo_name)
+        return {
+            **self.headers,
+            "Authorization": f"Bearer {token}"
+        }
+
     @action(description="Make a request to the Bitbucket API endpoint with the given params and data")
-    def _make_request(self, endpoint: str, params: Dict = None) -> Any:
+    def _make_request(self, endpoint: str, params: Dict = None, repo_name: Optional[str] = None) -> Any:
         """
         Make a request to the Bitbucket API.
 
         Args:
             endpoint: API endpoint to call (without base URL)
             params: Query parameters
+            repo_name: Repository name to determine which token to use
             method: HTTP method (GET, POST, PUT, DELETE)
 
         Returns:
             Response JSON as dictionary
         """
-
         url = endpoint if self.config.api_url in endpoint else f"{self.config.api_url}{endpoint}"
+        
+        # Use repo-specific headers if repo_name is provided
+        headers = self._get_headers_for_repo(repo_name) if repo_name else self.headers
 
         try:
             response = requests.get(
                 url=url,
-                headers=self.headers,
+                headers=headers,
                 params=params
             )
             response.raise_for_status()
@@ -62,31 +77,14 @@ class BitbucketClient(CodingClient):
     @action(description="Lists all accessible workspaces")
     def list_workspaces(self) -> List[str]:
         """List all accessible repositories."""
-
-        # Bitbucket API uses pagination
-        params = {"pagelen": 100}  # Maximum allowed per page
-        all_workspaces = set()
-
-        endpoint = "/repositories?role=member"
-        while True:
-            response = self._make_request(endpoint, params=params)
-            values = response.get("values", [])
-
-            for repo in values:
-                if repo.get("is_private") and not repo.get("has_access", True):
-                    continue
-                all_workspaces.add(repo.get("full_name").split("/")[0])
-
-            # Handle pagination
-            next_page = response.get("next")
-            if not next_page:
-                break
-
-            # For next page, we use the full URL
-            params = None
-            endpoint = next_page
-
-        return list(all_workspaces)
+        # Get unique workspaces from the repository tokens we have
+        workspaces = set()
+        for repo_name in self.tokens.keys():
+            if "/" in repo_name:
+                workspace = repo_name.split("/")[0]
+                workspaces.add(workspace)
+        
+        return list(workspaces)
 
     @action(description="Lists all accessible repositories, filter repositories by passing specific workspace")
     def list_repositories(self, filter_workspace: Optional[str]) -> List[Dict[str, Any]]:
@@ -102,6 +100,7 @@ class BitbucketClient(CodingClient):
         all_repos = []
 
         while True:
+            # For each repository in the response, we'll need to use its specific token
             response = self._make_request(endpoint, params=params)
             values = response.get("values", [])
 
@@ -109,14 +108,25 @@ class BitbucketClient(CodingClient):
             for repo in values:
                 if repo.get("is_private") and not repo.get("has_access", True):
                     continue
-                repos.append({
-                    "name": repo.get("name"),
-                    "full_name": repo.get("full_name"),
-                    "url": repo.get("links", {}).get("self", {}).get("href"),
-                    "language": repo.get("language"),
-                    "description": repo.get("description"),
-                    "updated_on": repo.get("updated_on")
-                })
+                
+                full_name = repo.get("full_name")
+                try:
+                    # Try to get repository-specific details using the repo's token
+                    repo_response = self._make_request(
+                        f"/repositories/{full_name}",
+                        repo_name=full_name
+                    )
+                    repos.append({
+                        "name": repo_response.get("name"),
+                        "full_name": repo_response.get("full_name"),
+                        "url": repo_response.get("links", {}).get("self", {}).get("href"),
+                        "language": repo_response.get("language"),
+                        "description": repo_response.get("description"),
+                        "updated_on": repo_response.get("updated_on")
+                    })
+                except ValueError:
+                    # Skip repositories we don't have a token for
+                    continue
 
             all_repos.extend(repos)
 
@@ -143,10 +153,11 @@ class BitbucketClient(CodingClient):
                 raise ValueError("Workspace must be provided if repo_name doesn't include it")
             repo_slug = repo_name
 
+        full_repo_name = f"{workspace}/{repo_slug}"
         # Bitbucket uses repo_slug (URL-friendly version of the name)
         url = f"/repositories/{workspace}/{repo_slug}"
 
-        response = self._make_request(url)
+        response = self._make_request(url, repo_name=full_repo_name)
         return {
             "name": response.get("name"),
             "full_name": response.get("full_name"),
@@ -171,12 +182,13 @@ class BitbucketClient(CodingClient):
                 raise ValueError("Workspace must be provided if repo_name doesn't include it")
             repo_slug = repo_name
 
+        full_repo_name = f"{workspace}/{repo_slug}"
         url = f"/repositories/{workspace}/{repo_slug}/commits"
 
         # Set pagination
         params = {"pagelen": min(limit, 100)}  # Limit to requested number or max allowed
 
-        response = self._make_request(url, params=params)
+        response = self._make_request(url, params=params, repo_name=full_repo_name)
         commits = []
 
         for commit in response.get("values", []):
@@ -204,8 +216,11 @@ class BitbucketClient(CodingClient):
                 raise ValueError("Workspace must be provided if repo_name doesn't include it")
             repo_slug = repo_name
 
+        full_repo_name = f"{workspace}/{repo_slug}"
+        token = self._get_token_for_repo(full_repo_name)
+
         # Construct the HTTPS clone URL with credentials
-        url = f"https://x-token-auth:{self.config.access_token}@bitbucket.org/{workspace}/{repo_slug}.git"
+        url = f"https://x-token-auth:{token}@bitbucket.org/{workspace}/{repo_slug}.git"
         local_path = os.path.join(self.config.work_dir, repo_slug)
 
         if os.path.exists(local_path):
@@ -277,33 +292,29 @@ class BitbucketClient(CodingClient):
     #         return []
 
 
-# def main():
-#     # Configure the agent
-#     bitbucket_config = BitbucketConfig(
-#         access_token=os.getenv("BITBUCKET_TOKEN")
-#     )
-#
-#     # Create and run the agent
-#     client = BitbucketClient(bitbucket_config)
-#     print("=====================================================================")
-    # print(f"List repos: {client.execute_action("list_workspaces", {})}")
-    # print("=====================================================================")
-    # print(f"List repos: {client.execute_action("list_repositories", {})}")
-    # print("=====================================================================")
-    # print(f"Get repos: {client.execute_action("get_repository", {"repo_name": "horus-ai-labs/DistillFlow"})}")
-    # print("=====================================================================")
-    # print(f"List files: {client.execute_action("list_files", {"repo_name": "horus-ai-labs/DistillFlow"})}")
-    # print("=====================================================================")
-    # print(f"Recent commits: {client.execute_action("get_recent_commits", {"repo_name": "horus-ai-labs/DistillFlow"})}")
-    # print("=====================================================================")
-    # print(f"Search code: {client.execute_action("search_code", {"workspace": "horus-ai-labs", "repo_name": "DistillFlow", "query": "load_tokenizer"})}")
-    # print("=====================================================================")
-    # print(f"Read file: {client.execute_action("read_file", {"repo_name": "horus-ai-labs/DistillFlow", "file_path": "README.rst"})}")
-    # print("=====================================================================")
-    # print(f"Git diff: {client.execute_action("get_commit_diff", {"repo_name": "horus-ai-labs/DistillFlow", "commit_hash": "368a10b5463ebf6feda0c329a7edc6ba73242ddc"})}")
-    # print("=====================================================================")
-    # print(f"Read all files: {client.execute_action("read_all_files", {"workspace": "horus-ai-labs", "repo_name": "DistillFlow"})}")
+def main():
+    # Example token mapping
+    token_mapping = {
+        "workspace1/repo1": "token1",
+        "workspace2/repo2": "token2"
+    }
+    
+    # Configure the agent with token mapping
+    bitbucket_config = BitbucketConfig(
+        access_tokens=token_mapping
+    )
+
+    # Create and run the agent
+    client = BitbucketClient(bitbucket_config)
+    
+    # Example usage
+    print("=====================================================================")
+    print("Workspaces:", client.list_workspaces())
+    print("=====================================================================")
+    print("Repositories:", client.list_repositories("workspace1"))
+    print("=====================================================================")
+    print("Repository Details:", client.get_repository(None, "workspace1/repo1"))
 
 
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    main()
