@@ -227,6 +227,92 @@ class BitbucketClient(CodingClient):
 
         return local_path
 
+
+    @action(description="Creates a pull request in the specified repository")
+    def create_pull_request(self, workspace: Optional[str], repo_name: str, source_branch: str,
+                           destination_branch: str, title: str, description: str = "",
+                           reviewers: List[str] = None, close_source_branch: bool = True) -> Dict[str, Any]:
+        """
+        Create a pull request in the specified repository.
+
+        Args:
+            workspace: The workspace where the repository is located
+            repo_name: The name of the repository (can be in format "workspace/repo")
+            source_branch: The source branch name
+            destination_branch: The destination branch name
+            title: The title of the pull request
+            description: The description of the pull request
+            reviewers: List of reviewer UUIDs or usernames
+            close_source_branch: Whether to close the source branch after merge
+
+        Returns:
+            Dictionary containing the created pull request details
+        """
+        if "/" in repo_name:
+            # If full path is provided (workspace/repo)
+            workspace, repo_slug = repo_name.split("/")
+        else:
+            # Use provided workspace and repo name
+            if not workspace:
+                raise ValueError("Workspace must be provided if repo_name doesn't include it")
+            repo_slug = repo_name
+
+        url = f"/repositories/{workspace}/{repo_slug}/pullrequests"
+
+        # Prepare the request data
+        data = {
+            "title": title,
+            "description": description,
+            "source": {
+                "branch": {
+                    "name": source_branch
+                }
+            },
+            "destination": {
+                "branch": {
+                    "name": destination_branch
+                }
+            },
+            "close_source_branch": close_source_branch
+        }
+
+        # Add reviewers if provided
+        if reviewers:
+            data["reviewers"] = [{"uuid": reviewer} if len(reviewer) == 36 else {"username": reviewer}
+                                for reviewer in reviewers]
+
+        full_repo_name = f"{workspace}/{repo_slug}"
+
+        # Make POST request to create the PR using repo-specific headers
+        try:
+            response = requests.post(
+                url=f"{self.config.api_url}{url}",
+                headers=self.headers,
+                json=data
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            return {
+                "id": result.get("id"),
+                "title": result.get("title"),
+                "description": result.get("description"),
+                "state": result.get("state"),
+                "source_branch": result.get("source", {}).get("branch", {}).get("name"),
+                "destination_branch": result.get("destination", {}).get("branch", {}).get("name"),
+                "author": result.get("author", {}).get("display_name"),
+                "created_on": result.get("created_on"),
+                "updated_on": result.get("updated_on"),
+                "url": result.get("links", {}).get("html", {}).get("href")
+            }
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Error creating pull request: {e}")
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                self.logger.error(f"Response content: {e.response.text}")
+            raise
+
+
+
     # @action(description="Searches for code in the workspace or repository")
     # def search_code(self, workspace: Optional[str], repo_name: Optional[str], query: str) -> List[Dict[str, Any]]:
     #     """
@@ -275,35 +361,3 @@ class BitbucketClient(CodingClient):
     #     except Exception as e:
     #         self.logger.error(f"Error searching code in Bitbucket: {e}")
     #         return []
-
-
-# def main():
-#     # Configure the agent
-#     bitbucket_config = BitbucketConfig(
-#         access_token=os.getenv("BITBUCKET_TOKEN")
-#     )
-#
-#     # Create and run the agent
-#     client = BitbucketClient(bitbucket_config)
-#     print("=====================================================================")
-    # print(f"List repos: {client.execute_action("list_workspaces", {})}")
-    # print("=====================================================================")
-    # print(f"List repos: {client.execute_action("list_repositories", {})}")
-    # print("=====================================================================")
-    # print(f"Get repos: {client.execute_action("get_repository", {"repo_name": "horus-ai-labs/DistillFlow"})}")
-    # print("=====================================================================")
-    # print(f"List files: {client.execute_action("list_files", {"repo_name": "horus-ai-labs/DistillFlow"})}")
-    # print("=====================================================================")
-    # print(f"Recent commits: {client.execute_action("get_recent_commits", {"repo_name": "horus-ai-labs/DistillFlow"})}")
-    # print("=====================================================================")
-    # print(f"Search code: {client.execute_action("search_code", {"workspace": "horus-ai-labs", "repo_name": "DistillFlow", "query": "load_tokenizer"})}")
-    # print("=====================================================================")
-    # print(f"Read file: {client.execute_action("read_file", {"repo_name": "horus-ai-labs/DistillFlow", "file_path": "README.rst"})}")
-    # print("=====================================================================")
-    # print(f"Git diff: {client.execute_action("get_commit_diff", {"repo_name": "horus-ai-labs/DistillFlow", "commit_hash": "368a10b5463ebf6feda0c329a7edc6ba73242ddc"})}")
-    # print("=====================================================================")
-    # print(f"Read all files: {client.execute_action("read_all_files", {"workspace": "horus-ai-labs", "repo_name": "DistillFlow"})}")
-
-
-# if __name__ == "__main__":
-#     main()
