@@ -44,16 +44,7 @@ def test_create_pr():
         # Verify repository access first
         repo_details = client.get_repository(None, repo_name)
         print("Repository Details:", repo_details)
-
-        # # Get repository branches to verify source branch exists
-        # branches_response = client._make_request(
-        #     f"{config.api_url}/repositories/{repo_name}/refs/branches"
-        # )
-        # branches_response.raise_for_status()
-        # branches = branches_response.json()
-        # print("\nAvailable branches:")
-        # for branch in branches.get('values', []):
-        #     print(f"- {branch.get('name')}")
+        print("Repositories:", client.list_repositories("horus-ai-labs"))
 
         # Create the pull request using full repo name format
         pr_result = client.create_pull_request(
@@ -63,8 +54,7 @@ def test_create_pr():
             destination_branch="main",
             title="Test Pull Request",
             description="This is a test pull request created via the API",
-            reviewers=None,
-            close_source_branch=True
+            close_source_branch=False
         )
 
         # Print the result

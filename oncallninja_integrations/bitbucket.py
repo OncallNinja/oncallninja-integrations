@@ -30,7 +30,7 @@ class BitbucketClient(CodingClient):
         os.makedirs(self.config.work_dir, exist_ok=True)
 
     @action(description="Make a request to the Bitbucket API endpoint with the given params and data")
-    def _make_request(self, endpoint: str, params: Dict = None) -> Any:
+    def _make_request(self, endpoint: str, params: Dict = None, method: str = "GET", data: Dict = None) -> Any:
         """
         Make a request to the Bitbucket API.
 
@@ -38,6 +38,7 @@ class BitbucketClient(CodingClient):
             endpoint: API endpoint to call (without base URL)
             params: Query parameters
             method: HTTP method (GET, POST, PUT, DELETE)
+            data: Request body for POST, PUT requests
 
         Returns:
             Response JSON as dictionary
@@ -45,12 +46,39 @@ class BitbucketClient(CodingClient):
 
         url = endpoint if self.config.api_url in endpoint else f"{self.config.api_url}{endpoint}"
 
+        headers = self.headers.copy()  # Create a copy to avoid modifying the original
+        if method in ("POST", "PUT"):
+            headers["Content-Type"] = "application/json"
+
         try:
-            response = requests.get(
-                url=url,
-                headers=self.headers,
-                params=params
-            )
+            if method == "GET":
+                response = requests.get(
+                    url=url,
+                    headers=headers,
+                    params=params
+                )
+            elif method == "POST":
+                response = requests.post(
+                    url=url,
+                    headers=headers,
+                    json=data
+                )
+            elif method == "PUT":
+                response = requests.put(
+                    url=url,
+                    headers=headers,
+                    json=data
+                )
+            elif method == "DELETE":
+                response = requests.delete(
+                    url=url,
+                    headers=headers,
+                    params=params # or json=data if needed for DELETE
+                )
+            else:
+                raise ValueError(f"Unsupported HTTP method: {method}")
+
+
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -229,20 +257,18 @@ class BitbucketClient(CodingClient):
 
 
     @action(description="Creates a pull request in the specified repository")
-    def create_pull_request(self, workspace: Optional[str], repo_name: str, source_branch: str,
-                           destination_branch: str, title: str, description: str = "",
-                           reviewers: List[str] = None, close_source_branch: bool = True) -> Dict[str, Any]:
+    def create_pull_request(self, workspace: Optional[str], repo_name: str, new_branch_name: str,
+                           base_branch: str, title: str, description: str = "", close_source_branch: bool = False) -> Dict[str, Any]:
         """
         Create a pull request in the specified repository.
 
         Args:
             workspace: The workspace where the repository is located
             repo_name: The name of the repository (can be in format "workspace/repo")
-            source_branch: The source branch name
-            destination_branch: The destination branch name
+            new_branch_name: The source branch name
+            base_branch: The destination branch name
             title: The title of the pull request
             description: The description of the pull request
-            reviewers: List of reviewer UUIDs or usernames
             close_source_branch: Whether to close the source branch after merge
 
         Returns:
@@ -265,41 +291,30 @@ class BitbucketClient(CodingClient):
             "description": description,
             "source": {
                 "branch": {
-                    "name": source_branch
+                    "name": new_branch_name
                 }
             },
             "destination": {
                 "branch": {
-                    "name": destination_branch
+                    "name": base_branch
                 }
             },
             "close_source_branch": close_source_branch
         }
 
-        # Add reviewers if provided
-        if reviewers:
-            data["reviewers"] = [{"uuid": reviewer} if len(reviewer) == 36 else {"username": reviewer}
-                                for reviewer in reviewers]
-
         full_repo_name = f"{workspace}/{repo_slug}"
 
         # Make POST request to create the PR using repo-specific headers
         try:
-            response = requests.post(
-                url=f"{self.config.api_url}{url}",
-                headers=self.headers,
-                json=data
-            )
-            response.raise_for_status()
-            result = response.json()
+            result = self._make_request(url, data=data, method="POST")
 
             return {
                 "id": result.get("id"),
                 "title": result.get("title"),
                 "description": result.get("description"),
                 "state": result.get("state"),
-                "source_branch": result.get("source", {}).get("branch", {}).get("name"),
-                "destination_branch": result.get("destination", {}).get("branch", {}).get("name"),
+                "new_branch_name": result.get("source", {}).get("branch", {}).get("name"),
+                "base_branch": result.get("destination", {}).get("branch", {}).get("name"),
                 "author": result.get("author", {}).get("display_name"),
                 "created_on": result.get("created_on"),
                 "updated_on": result.get("updated_on"),
@@ -309,6 +324,48 @@ class BitbucketClient(CodingClient):
             self.logger.error(f"Error creating pull request: {e}")
             if hasattr(e, 'response') and hasattr(e.response, 'text'):
                 self.logger.error(f"Response content: {e.response.text}")
+            raise
+
+    @action(description="Commits all local changes and pushes to a new Bitbucket branch")
+    def commit_changes(self, workspace: Optional[str], repo_name: str,
+                        commit_message: str, new_branch_name: str, base_branch: str = "main") -> None:
+        """
+        Commits all local changes, creates a new branch, and pushes to that Bitbucket branch.
+
+        Args:
+            repo_name: The name of the repository (can be in format "workspace/repo")
+            new_branch_name: The name of the new branch to create
+            base_branch: The branch to branch off from (default: main)
+        """
+        if "/" in repo_name:
+            # If full path is provided (workspace/repo)
+            workspace, repo_slug = repo_name.split("/")
+        else:
+            # Use provided workspace and repo name
+            if not workspace:
+                raise ValueError("Workspace must be provided if repo_name doesn't include it")
+            repo_slug = repo_name
+
+        try:
+            # 1. Create new branch
+            subprocess.run(["git", "checkout", "-b", new_branch_name, base_branch], check=True)
+
+            # 2. Add all changes
+            subprocess.run(["git", "add", "."], check=True)
+
+            # 3. Commit changes
+            subprocess.run(["git", "commit", "-m", commit_message], check=True)
+
+            # 4. Push to the new branch
+            push_url = f"https://x-token-auth:{self.config.access_token}@bitbucket.org/{workspace}/{repo_slug}.git"
+            subprocess.run(["git", "push", push_url, new_branch_name], check=True)
+            self.logger.info(f"Successfully created branch '{new_branch_name}' pushed to Bitbucket.")
+
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Error during commit and push: {e}")
+            raise
+        except Exception as e:
+            self.logger.error(f"An unexpected error occurred: {e}")
             raise
 
 
