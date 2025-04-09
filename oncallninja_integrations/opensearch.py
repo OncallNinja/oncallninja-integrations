@@ -168,7 +168,7 @@ class AWSOpenSearchClient(ActionRouter):
             API response as dictionary
         """
         endpoint = endpoint.lstrip('/')
-        url = f"{self.dashboards_base_url}/api/{endpoint}"
+        url = f"{self.opensearch_base_url}/_dashboards/api/{endpoint}"
 
         try:
             headers, auth = self._setup_auth()
@@ -488,7 +488,7 @@ class AWSOpenSearchClient(ActionRouter):
         Returns:
             Dashboards status information
         """
-        return self._make_dashboards_request("GET", "status")
+        return self._make_dashboards_request("POST", "status")
 
     @action(description="OPENSEARCH: Create or update index mapping")
     def create_index_mapping(self, index: str, mapping: Dict) -> Dict:
