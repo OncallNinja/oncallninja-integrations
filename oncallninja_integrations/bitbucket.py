@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field
 from .action_router import action
 from .code_client import CodingClient
 
+log = logging.getLogger(__name__)
+
 class BitbucketConfig(BaseModel):
     access_token: str = Field(..., description="Bitbucket access token")
     api_url: str = Field("https://api.bitbucket.org/2.0", description="Bitbucket API URL")
@@ -241,8 +243,27 @@ class BitbucketClient(CodingClient):
             os.chdir(local_path)
             # Set the remote URL with credentials before pulling
             subprocess.run(["git", "remote", "set-url", "origin", url], check=True)
-            # Pull the latest changes
-            subprocess.run(["git", "pull"], check=True)
+
+            # Check if there are local changes
+            result = subprocess.run(["git", "status", "--porcelain"], check=True, capture_output=True, text=True)
+
+            if result.stdout.strip():
+                # There are local changes
+                log.info()
+
+                # Log the changes
+                changes = subprocess.run(["git", "status"], check=True, capture_output=True, text=True)
+                log.info(f"Local changes detected: {changes.stdout}, removing...")
+
+                subprocess.run(["git", "reset", "--hard", "HEAD"], check=True)
+            try:
+                # Pull the latest changes
+                subprocess.run(["git", "pull"], check=True)
+                log.info("Successfully pulled latest changes")
+
+            except subprocess.CalledProcessError as e:
+                log.info(f"Error pulling changes: {e}")
+                # Handle the error (retry, notify user, etc.)
         else:
             # Clone with credentials in URL
             subprocess.run(["git", "clone", url, local_path], check=True)
