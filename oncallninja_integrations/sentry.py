@@ -620,6 +620,7 @@ class SentryAPIClient(ActionRouter):
 
         return "\n".join(formatted_trace)
 
+    @action
     def get_formatted_stack_trace(self, issue_id: str) -> str:
         """
         Get a formatted stack trace for a specific issue.
