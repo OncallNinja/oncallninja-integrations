@@ -248,9 +248,6 @@ class BitbucketClient(CodingClient):
             result = subprocess.run(["git", "status", "--porcelain"], check=True, capture_output=True, text=True)
 
             if result.stdout.strip():
-                # There are local changes
-                log.info()
-
                 # Log the changes
                 changes = subprocess.run(["git", "status"], check=True, capture_output=True, text=True)
                 log.info(f"Local changes detected: {changes.stdout}, removing...")
