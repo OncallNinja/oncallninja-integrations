@@ -68,9 +68,6 @@ class CodingClient(ActionRouter):
             dirs[:] = [d for d in dirs if not d.startswith('.')]
 
             for file_name in files:
-                if file_name.startswith('.'):
-                    continue
-
                 # Skip binary/common non-code files (adjust patterns as needed)
                 file_path = os.path.join(root, file_name)
                 relative_path = os.path.relpath(file_path, repo_path)
