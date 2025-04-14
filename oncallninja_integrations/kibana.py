@@ -23,6 +23,7 @@ class KibanaClient(ActionRouter):
             'Content-Type': 'application/json'
         })
         self.logger = logging.getLogger(__name__)
+        super.__init__()
     
     @action(description="KIBANA API: Make HTTP request.")
     def _make_request(self, method: str, path: str, params: Optional[Dict] = None, 
