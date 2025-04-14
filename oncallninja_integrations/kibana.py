@@ -65,7 +65,7 @@ class KibanaClient(ActionRouter):
         return result.get('saved_objects', [])
     
 
-    @action(description="KIBANA API: Get logs. Supply an index pattern, optionally start and end time, optional log_level, optional search query, and size (default set as 100). Maximum time window is 6 hours.")
+    @action(description="KIBANA API: Get logs. Supply an index pattern, optionally start and end time, optional log_level, optional search query, and size (default set as 100). Maximum time window is 1 hours.")
     def get_logs(
         self,
         index_pattern: str,
@@ -78,7 +78,7 @@ class KibanaClient(ActionRouter):
     ) -> Dict:
         """
         Get logs within a specified time range with optional filters.
-        If time window exceeds 6 hours, it will be automatically adjusted to 6 hours
+        If time window exceeds 1 hour, it will be automatically adjusted to 1 hour
         (looking forward from start_time or backward from end_time).
         
         Args:
@@ -106,13 +106,13 @@ class KibanaClient(ActionRouter):
         
         # Calculate time difference
         time_diff = end_dt - start_dt
-        max_window = timedelta(hours=6)
+        max_window = timedelta(hours=1)
         
-        # Adjust time window if it exceeds 6 hours
+        # Adjust time window if it exceeds 1 hour
         if time_diff > max_window:
             self.logger.warning(
-                f"Time window of {time_diff} exceeds maximum allowed 6 hours. "
-                f"Adjusting to 6 hour window ending at {end_dt.isoformat()}"
+                f"Time window of {time_diff} exceeds maximum allowed 1 hour. "
+                f"Adjusting to 1 hour window ending at {end_dt.isoformat()}"
             )
             start_dt = end_dt - max_window
         
