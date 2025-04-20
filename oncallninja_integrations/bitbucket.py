@@ -1,5 +1,3 @@
-import base64
-import fnmatch
 import logging
 import os
 import subprocess
@@ -49,8 +47,7 @@ class BitbucketClient(CodingClient):
         url = endpoint if self.config.api_url in endpoint else f"{self.config.api_url}{endpoint}"
 
         headers = self.headers.copy()  # Create a copy to avoid modifying the original
-        if method in ("POST", "PUT"):
-            headers["Content-Type"] = "application/json"
+        headers["Content-Type"] = "application/json"
 
         try:
             if method == "GET":
@@ -65,18 +62,6 @@ class BitbucketClient(CodingClient):
                     headers=headers,
                     json=data
                 )
-            elif method == "PUT":
-                response = requests.put(
-                    url=url,
-                    headers=headers,
-                    json=data
-                )
-            elif method == "DELETE":
-                response = requests.delete(
-                    url=url,
-                    headers=headers,
-                    params=params # or json=data if needed for DELETE
-                )
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
 
@@ -89,13 +74,13 @@ class BitbucketClient(CodingClient):
                 self.logger.error(f"Response content: {e.response.text}")
             raise
 
-    @action(description="Lists all accessible workspaces")
-    def list_workspaces(self) -> List[str]:
+    @action(description="Lists all accessible org_names")
+    def list_all_orgs(self) -> List[str]:
         """List all accessible repositories."""
 
         # Bitbucket API uses pagination
         params = {"pagelen": 100}  # Maximum allowed per page
-        all_workspaces = set()
+        all_org_names = set()
 
         endpoint = "/repositories?role=member"
         while True:
@@ -105,7 +90,7 @@ class BitbucketClient(CodingClient):
             for repo in values:
                 if repo.get("is_private") and not repo.get("has_access", True):
                     continue
-                all_workspaces.add(repo.get("full_name").split("/")[0])
+                all_org_names.add(repo.get("full_name").split("/")[0])
 
             # Handle pagination
             next_page = response.get("next")
@@ -116,16 +101,16 @@ class BitbucketClient(CodingClient):
             params = None
             endpoint = next_page
 
-        return list(all_workspaces)
+        return list(all_org_names)
 
-    @action(description="Lists all accessible repositories, filter repositories by passing specific workspace")
-    def list_repositories(self, filter_workspace: Optional[str]) -> List[Dict[str, Any]]:
+    @action(description="Lists all accessible repositories, filter repositories by passing specific org_name")
+    def list_repositories(self, filter_org_name: Optional[str]) -> List[Dict[str, Any]]:
         """List all accessible repositories."""
-        if not filter_workspace:
+        if not filter_org_name:
             # Get user's repositories
             endpoint = "/repositories?role=member"
         else:
-            endpoint = f"/repositories/{filter_workspace}"
+            endpoint = f"/repositories/{filter_org_name}"
 
         # Bitbucket API uses pagination
         params = {"pagelen": 100}  # Maximum allowed per page
@@ -162,19 +147,19 @@ class BitbucketClient(CodingClient):
         return all_repos
 
     @action(description="Gets details about a specific repository")
-    def get_repository(self, workspace: Optional[str], repo_name: str) -> Dict[str, Any]:
+    def get_repository(self, org_name: Optional[str], repo_name: str) -> Dict[str, Any]:
         """Get repository details."""
         if "/" in repo_name:
-            # If full path is provided (workspace/repo)
-            workspace, repo_slug = repo_name.split("/")
+            # If full path is provided (org_name/repo)
+            org_name, repo_slug = repo_name.split("/")
         else:
-            # Use provided workspace and repo name
-            if not workspace:
+            # Use provided org_name and repo name
+            if not org_name:
                 raise ValueError("Workspace must be provided if repo_name doesn't include it")
             repo_slug = repo_name
 
         # Bitbucket uses repo_slug (URL-friendly version of the name)
-        url = f"/repositories/{workspace}/{repo_slug}"
+        url = f"/repositories/{org_name}/{repo_slug}"
 
         response = self._make_request(url)
         return {
@@ -190,18 +175,18 @@ class BitbucketClient(CodingClient):
         }
 
     @action(description="Gets recent commits made to the repository, default limit: 10")
-    def get_recent_commits(self, workspace: Optional[str], repo_name: str, limit: int = 10) -> List[Dict[str, Any]]:
+    def get_recent_commits(self, org_name: Optional[str], repo_name: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Get recent commits for a repository."""
         if "/" in repo_name:
-            # If full path is provided (workspace/repo)
-            workspace, repo_slug = repo_name.split("/")
+            # If full path is provided (org_name/repo)
+            org_name, repo_slug = repo_name.split("/")
         else:
-            # Use provided workspace and repo name
-            if not workspace:
+            # Use provided org_name and repo name
+            if not org_name:
                 raise ValueError("Workspace must be provided if repo_name doesn't include it")
             repo_slug = repo_name
 
-        url = f"/repositories/{workspace}/{repo_slug}/commits"
+        url = f"/repositories/{org_name}/{repo_slug}/commits"
 
         # Set pagination
         params = {"pagelen": min(limit, 100)}  # Limit to requested number or max allowed
@@ -223,19 +208,19 @@ class BitbucketClient(CodingClient):
 
         return commits
 
-    def clone_repository(self, workspace: Optional[str], repo_name: str) -> str:
+    def clone_repository(self, org_name: Optional[str], repo_name: str) -> str:
         """Clone a repository and return the local path."""
         if "/" in repo_name:
-            # If full path is provided (workspace/repo)
-            workspace, repo_slug = repo_name.split("/")
+            # If full path is provided (org_name/repo)
+            org_name, repo_slug = repo_name.split("/")
         else:
-            # Use provided workspace and repo name
-            if not workspace:
+            # Use provided org_name and repo name
+            if not org_name:
                 raise ValueError("Workspace must be provided if repo_name doesn't include it")
             repo_slug = repo_name
 
         # Construct the HTTPS clone URL with credentials
-        url = f"https://x-token-auth:{self.config.access_token}@bitbucket.org/{workspace}/{repo_slug}.git"
+        url = f"https://x-token-auth:{self.config.access_token}@bitbucket.org/{org_name}/{repo_slug}.git"
         local_path = os.path.join(self.config.work_dir, repo_slug)
 
         if os.path.exists(local_path):
@@ -266,7 +251,7 @@ class BitbucketClient(CodingClient):
             subprocess.run(["git", "clone", url, local_path], check=True)
             os.chdir(local_path)
             # Remove credentials from recorded remote URL
-            clean_url = f"https://bitbucket.org/{workspace}/{repo_slug}.git"
+            clean_url = f"https://bitbucket.org/{org_name}/{repo_slug}.git"
             subprocess.run(["git", "remote", "set-url", "origin", clean_url], check=True)
             # Configure credential helper
             subprocess.run(["git", "config", "--local", "credential.helper", "cache"], check=True)
@@ -275,14 +260,14 @@ class BitbucketClient(CodingClient):
 
 
     @action(description="Creates a pull request in the specified repository")
-    def create_pull_request(self, workspace: Optional[str], repo_name: str, new_branch_name: str,
+    def create_pull_request(self, org_name: Optional[str], repo_name: str, new_branch_name: str,
                            base_branch: str, title: str, description: str = "", close_source_branch: bool = False) -> Dict[str, Any]:
         """
         Create a pull request in the specified repository.
 
         Args:
-            workspace: The workspace where the repository is located
-            repo_name: The name of the repository (can be in format "workspace/repo")
+            org_name: The org_name where the repository is located
+            repo_name: The name of the repository (can be in format "org_name/repo")
             new_branch_name: The source branch name
             base_branch: The destination branch name
             title: The title of the pull request
@@ -293,15 +278,15 @@ class BitbucketClient(CodingClient):
             Dictionary containing the created pull request details
         """
         if "/" in repo_name:
-            # If full path is provided (workspace/repo)
-            workspace, repo_slug = repo_name.split("/")
+            # If full path is provided (org_name/repo)
+            org_name, repo_slug = repo_name.split("/")
         else:
-            # Use provided workspace and repo name
-            if not workspace:
+            # Use provided org_name and repo name
+            if not org_name:
                 raise ValueError("Workspace must be provided if repo_name doesn't include it")
             repo_slug = repo_name
 
-        url = f"/repositories/{workspace}/{repo_slug}/pullrequests"
+        url = f"/repositories/{org_name}/{repo_slug}/pullrequests"
 
         # Prepare the request data
         data = {
@@ -320,7 +305,7 @@ class BitbucketClient(CodingClient):
             "close_source_branch": close_source_branch
         }
 
-        full_repo_name = f"{workspace}/{repo_slug}"
+        full_repo_name = f"{org_name}/{repo_slug}"
 
         # Make POST request to create the PR using repo-specific headers
         try:
@@ -345,22 +330,22 @@ class BitbucketClient(CodingClient):
             raise
 
     @action(description="Commits all local changes and pushes to a new Bitbucket branch")
-    def commit_changes(self, workspace: Optional[str], repo_name: str,
+    def commit_changes(self, org_name: Optional[str], repo_name: str,
                         commit_message: str, new_branch_name: str, base_branch: str = "main") -> None:
         """
         Commits all local changes, creates a new branch, and pushes to that Bitbucket branch.
 
         Args:
-            repo_name: The name of the repository (can be in format "workspace/repo")
+            repo_name: The name of the repository (can be in format "org_name/repo")
             new_branch_name: The name of the new branch to create
             base_branch: The branch to branch off from (default: main)
         """
         if "/" in repo_name:
-            # If full path is provided (workspace/repo)
-            workspace, repo_slug = repo_name.split("/")
+            # If full path is provided (org_name/repo)
+            org_name, repo_slug = repo_name.split("/")
         else:
-            # Use provided workspace and repo name
-            if not workspace:
+            # Use provided org_name and repo name
+            if not org_name:
                 raise ValueError("Workspace must be provided if repo_name doesn't include it")
             repo_slug = repo_name
 
@@ -375,7 +360,7 @@ class BitbucketClient(CodingClient):
             subprocess.run(["git", "commit", "-m", commit_message], check=True)
 
             # 4. Push to the new branch
-            push_url = f"https://x-token-auth:{self.config.access_token}@bitbucket.org/{workspace}/{repo_slug}.git"
+            push_url = f"https://x-token-auth:{self.config.access_token}@bitbucket.org/{org_name}/{repo_slug}.git"
             subprocess.run(["git", "push", push_url, new_branch_name], check=True)
             self.logger.info(f"Successfully created branch '{new_branch_name}' pushed to Bitbucket.")
 
@@ -386,27 +371,16 @@ class BitbucketClient(CodingClient):
             self.logger.error(f"An unexpected error occurred: {e}")
             raise
 
-
-
-    # @action(description="Searches for code in the workspace or repository")
-    # def search_code(self, workspace: Optional[str], repo_name: Optional[str], query: str) -> List[Dict[str, Any]]:
+    # @action(description="Searches for code in the org_name or repository")
+    # def search_code_across_org(self, org_name: Optional[str], query: str) -> List[Dict[str, Any]]:
     #     """
     #     Search for code in repositories using Bitbucket's code search API.
     #     """
-    #     if not repo_name:
+    #     if not org_name:
     #         self.logger.warning("Bitbucket requires a specific repository for code search")
     #         return []
     #
-    #     # Extract workspace and repo_slug from repo_name if provided as "workspace/repo"
-    #     if "/" in repo_name:
-    #         workspace, repo_slug = repo_name.split("/", 1)  # Split on first occurrence only
-    #     else:
-    #         if not workspace:
-    #             self.logger.error("Workspace is required when repo_name is not in 'workspace/repo' format")
-    #             return []
-    #         repo_slug = repo_name
-    #
-    #     url = f"/workspaces/{workspace}/search/code"
+    #     url = f"/org_names/{org_name}/search/code"
     #
     #     try:
     #         search_results = []
@@ -436,3 +410,32 @@ class BitbucketClient(CodingClient):
     #     except Exception as e:
     #         self.logger.error(f"Error searching code in Bitbucket: {e}")
     #         return []
+
+# # Command Line Interface
+# def main():
+#     # Configure the agent
+#     github_config = BitbucketConfig(
+#         access_token=os.getenv("BITBUCKET_TOKEN")
+#     )
+#
+#     # Create and run the agent
+#     client = BitbucketClient(github_config)
+#     print("=====================================================================")
+#     print(f'List repos: {client.execute_action("list_repositories", {"org_name": "horus-ai-labs"})}')
+#     # print("=====================================================================")
+#     print(f'Get repos: {client.execute_action("get_repository", {"org_name": "horus-ai-labs", "repo_name": "DistillFlow"})}')
+#     # print("=====================================================================")
+#     print(f'List files: {client.execute_action("list_files", {"org_name": "horus-ai-labs", "repo_name": "DistillFlow"})}')
+#     # print("=====================================================================")
+#     # print(f'Recent commits: {client.execute_action("get_recent_commits", {"repo_name": "horus-ai-labs/DistillFlow"})}')
+#     print("=====================================================================")
+#     print(f'Search code: {client.execute_action("search_code_across_org", {"org_name": "horus-ai-labs", "query": "load_tokenizer"})}')
+#     print("=====================================================================")
+#     # print(f'ls: {client.execute_action("list_files", {"repo_name": "horus-ai-labs/DistillFlow"})}')
+#     # print("=====================================================================")
+#     # print(f'Read file: {client.execute_action("read_file", {"repo_name": "horus-ai-labs/DistillFlow", "file_path": "README.rst"})}')
+#     # print("=====================================================================")
+#     # print(f'Read file: {client.execute_action("get_commit_diff", {"repo_name": "horus-ai-labs/DistillFlow", "commit_hash": "368a10b5463ebf6feda0c329a7edc6ba73242ddc"})}')
+#
+# if __name__ == "__main__":
+#     main()

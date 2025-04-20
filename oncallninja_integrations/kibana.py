@@ -1,441 +1,227 @@
 import requests
-import json
-from typing import Dict, List, Optional, Union
+from typing import List, Dict, Optional, Union, Tuple
 from datetime import datetime, timedelta
-import urllib.parse
-import base64
-
-from .action_router import action, ActionRouter
-
+from .action_router import ActionRouter, action
+import logging 
 
 class KibanaClient(ActionRouter):
-    def __init__(
-            self,
-            cloud_id: str = None,
-            elasticsearch_url: str = None,
-            kibana_url: str = None,
-            api_key: str = None,
-            username: str = None,
-            password: str = None
-    ):
+    def __init__(self, base_url: str, username: str, password: str):
         """
-        Initialize Managed Kibana API interface
-
+        Initialize the Kibana client with authentication credentials.
+        
         Args:
-            cloud_id: Elastic Cloud ID (preferred method for managed Elasticsearch)
-            elasticsearch_url: Direct Elasticsearch URL (alternative to cloud_id)
-            kibana_url: Direct Kibana URL (alternative to cloud_id)
-            api_key: Elastic API key for authentication (preferred over username/password)
-            username: Username for basic authentication
-            password: Password for basic authentication
+            base_url: Base URL of your Kibana instance (e.g., "https://logs.nanonets.com")
+            username: Kibana username
+            password: Kibana password
         """
-        self.headers = {
-            "kbn-xsrf": "true",
-            "Content-Type": "application/json"
-        }
-
-        # Setup authentication
-        if api_key:
-            self.headers["Authorization"] = f"ApiKey {api_key}"
-            self.auth = None
-
-        # Setup endpoint URLs
-        if cloud_id:
-            # Parse cloud ID to extract Elasticsearch and Kibana URLs
-            decoded = base64.b64decode(cloud_id.split(':')[1]).decode('utf-8')
-            domain, es_uuid, kb_uuid = decoded.split('$')
-
-            self.elasticsearch_base_url = f"https://{es_uuid}.{domain}"
-            self.kibana_base_url = f"https://{kb_uuid}.{domain}"
+        self.base_url = base_url.rstrip('/')
+        self.auth = (username, password)
+        self.session = requests.Session()
+        self.session.auth = self.auth
+        self.session.headers.update({
+            'kbn-xsrf': 'true',
+            'Content-Type': 'application/json'
+        })
+        self.logger = logging.getLogger(__name__)
 
         super().__init__()
 
-    @action(description="ELASTIC_SEARCH: Make HTTP request.")
-    def _make_elasticsearch_request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
+    
+    @action(description="KIBANA API: Make HTTP request.")
+    def _make_request(self, method: str, path: str, params: Optional[Dict] = None, 
+                     data: Optional[Dict] = None) -> Dict:
         """
-        Make HTTP request to Elasticsearch API
-
-        Args:
-            method: HTTP method (GET, POST, PUT, DELETE)
-            endpoint: API endpoint
-            data: Request payload
-
-        Returns:
-            API response as dictionary
+        Internal method to make authenticated requests to Kibana API.
         """
-        url = f"{self.elasticsearch_base_url}/{endpoint.lstrip('/')}"
-
+        self.logger.info("Making HTTP request")
+        url = f"{self.base_url}{path}"
         try:
-            response = requests.request(
-                method=method,
-                url=url,
-                headers=self.headers,
+            response = self.session.request(
+                method,
+                url,
+                params=params,
                 json=data
             )
             response.raise_for_status()
-            return response.json() if response.text else {}
+            self.logger.info("HTTP request successful")
+            return response.json()
         except requests.exceptions.RequestException as e:
-            # Include response text in error if available
-            error_msg = f"API request failed: {str(e)}"
-            if hasattr(e, 'response') and e.response is not None:
-                error_msg += f" - Response: {e.response.text}"
-            raise Exception(error_msg)
-
-    @action(description="KIBANA: Make HTTP request.")
-    def _make_kibana_request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
+            raise Exception(f"Request failed: {str(e)}")
+    
+    @action(description="KIBANA API: Get index patterns.")
+    def get_index_patterns(self) -> List[Dict]:
         """
-        Make HTTP request to Kibana API
-
-        Args:
-            method: HTTP method (GET, POST, PUT, DELETE)
-            endpoint: API endpoint
-            data: Request payload
-
+        Get all index patterns from Kibana.
+        
         Returns:
-            API response as dictionary
+            List of index patterns with their details
         """
-        url = f"{self.kibana_base_url}/api/{endpoint.lstrip('/')}"
+        path = "/api/saved_objects/_find"
+        params = {
+            'type': 'index-pattern',
+            'fields': 'title'
+        }
+        result = self._make_request('GET', path, params=params)
+        return result.get('saved_objects', [])
+    
 
-        try:
-            response = requests.request(
-                method=method,
-                url=url,
-                headers=self.headers,
-                json=data
-            )
-            response.raise_for_status()
-            return response.json() if response.text else {}
-        except requests.exceptions.RequestException as e:
-            # Include response text in error if available
-            error_msg = f"API request failed: {str(e)}"
-            if hasattr(e, 'response') and e.response is not None:
-                error_msg += f" - Response: {e.response.text}"
-            raise Exception(error_msg)
-
-    @action(description="KIBANA: Get saved objects. Supply the type such as dashboard, visualization, search.")
-    def get_saved_objects(self, type: str) -> List[Dict]:
-        """
-        Get saved objects of specified type
-
-        Args:
-            type: Object type (dashboard, visualization, search, etc.)
-
-        Returns:
-            List of saved objects
-        """
-        return self._make_kibana_request("GET", f"saved_objects/_find?type={type}")
-
-    @action(description="KIBANA: get all index patterns.")
-    def get_index_patterns_kibana(self) -> List[Dict]:
-        """
-        Get all index patterns
-
-        Returns:
-            List of index patterns
-        """
-        return self._make_kibana_request("GET", "saved_objects/_find?type=index-pattern")
-
-    @action(description="KIBANA: Get space information")
-    def get_space_info(self, space_id: str = "default") -> Dict:
-        """
-        Get information about a Kibana space
-
-        Args:
-            space_id: Space identifier
-
-        Returns:
-            Space information
-        """
-        return self._make_kibana_request("GET", f"spaces/space/{space_id}")
-
-    @action(description="ELASTIC_SEARCH: Get logs. Supply a index_pattern, start_time and end_time, and optional filters")
+    @action(description="KIBANA API: Get logs. Supply an index pattern, optionally start and end time, optional log_level, optional search query, and size (default set as 100). Maximum time window is 1 hours.")
     def get_logs(
-            self,
-            index_pattern: str,
-            start_time: Union[str, datetime],
-            end_time: Union[str, datetime],
-            filters: Optional[Dict] = None,
-            size: int = 100,
-            sort_field: str = "@timestamp",
-            sort_order: str = "desc"
+        self,
+        index_pattern: str,
+        start_time: Union[str, datetime],
+        end_time: Union[str, datetime],
+        log_level: Optional[str] = None,
+        search_query: Optional[str] = None,
+        size: int = 100,
+        fields: Optional[List[str]] = None
     ) -> Dict:
         """
-        Get logs with various filtering options
-
+        Get logs within a specified time range with optional filters.
+        If time window exceeds 1 hour, it will be automatically adjusted to 1 hour
+        (looking forward from start_time or backward from end_time).
+        
         Args:
-            index_pattern: Index pattern to search
+            index_pattern: The index pattern to search (e.g., "python-logs-*")
             start_time: Start time (ISO format string or datetime object)
             end_time: End time (ISO format string or datetime object)
-            filters: Dictionary of filters to apply
-            size: Number of results to return
-            sort_field: Field to sort by
-            sort_order: Sort order ('asc' or 'desc')
-
+            log_level: Filter by log level (e.g., "error", "info")
+            search_query: Optional text to search in log messages
+            size: Maximum number of logs to return
+            fields: List of fields to include in response
+            
         Returns:
-            Dictionary containing matching logs
+            Dictionary containing the search results
         """
-        # Convert datetime objects to ISO format if needed
-        if isinstance(start_time, datetime):
-            start_time = start_time.isoformat()
-        if isinstance(end_time, datetime):
-            end_time = end_time.isoformat()
-
+        # Convert to datetime objects if they're strings
+        if isinstance(start_time, str):
+            start_dt = datetime.fromisoformat(start_time)
+        else:
+            start_dt = start_time
+            
+        if isinstance(end_time, str):
+            end_dt = datetime.fromisoformat(end_time)
+        else:
+            end_dt = end_time
+        
+        # Calculate time difference
+        time_diff = end_dt - start_dt
+        max_window = timedelta(hours=1)
+        
+        # Adjust time window if it exceeds 1 hour
+        if time_diff > max_window:
+            self.logger.warning(
+                f"Time window of {time_diff} exceeds maximum allowed 1 hour. "
+                f"Adjusting to 1 hour window ending at {end_dt.isoformat()}"
+            )
+            start_dt = end_dt - max_window
+        
+        # Convert back to ISO format strings for the query
+        start_time_iso = start_dt.isoformat()
+        end_time_iso = end_dt.isoformat()
+        
         # Build the query
-        query = {
-            "bool": {
-                "must": [
-                    {
-                        "range": {
-                            "@timestamp": {
-                                "gte": start_time,
-                                "lte": end_time
-                            }
-                        }
-                    }
-                ]
-            }
-        }
-
-        # Add custom filters if provided
-        if filters:
-            for field, value in filters.items():
-                if isinstance(value, dict) and ("gte" in value or "lte" in value or "gt" in value or "lt" in value):
-                    # Range filter
-                    query["bool"]["must"].append({
-                        "range": {
-                            field: value
-                        }
-                    })
-                elif isinstance(value, list):
-                    # Terms filter
-                    query["bool"]["must"].append({
-                        "terms": {
-                            field: value
-                        }
-                    })
-                else:
-                    # Match filter
-                    query["bool"]["must"].append({
-                        "match": {
-                            field: value
-                        }
-                    })
-
-        payload = {
-            "query": query,
-            "size": size,
-            "sort": [
-                {
-                    sort_field: {
-                        "order": sort_order
-                    }
-                }
-            ]
-        }
-
-        # For logs we query Elasticsearch directly
-        return self._make_elasticsearch_request("POST", f"{index_pattern}/_search", payload)
-
-    @action(description="ELASTIC_SEARCH: Get available fields in a elastic search index pattern")
-    def get_log_fields(self, index_pattern: str) -> List[str]:
-        """
-        Get available fields in the log index pattern
-
-        Args:
-            index_pattern: Index pattern to get fields from
-
-        Returns:
-            List of available fields
-        """
-        response = self._make_elasticsearch_request("GET", f"{index_pattern}/_mapping")
-
-        fields = []
-        # Extract fields from mapping
-        for index, mapping in response.items():
-            properties = mapping.get("mappings", {}).get("properties", {})
-            for field, _ in self._extract_fields_from_properties(properties):
-                if field not in fields:
-                    fields.append(field)
-
-        return sorted(fields)
-
-    def _extract_fields_from_properties(self, properties, parent=""):
-        """
-        Recursively extract fields from Elasticsearch mapping properties
-        """
-        fields = []
-        for field_name, field_properties in properties.items():
-            full_name = f"{parent}{field_name}" if parent else field_name
-            fields.append((full_name, field_properties.get("type")))
-
-            if "properties" in field_properties:
-                nested_fields = self._extract_fields_from_properties(
-                    field_properties["properties"],
-                    f"{full_name}."
-                )
-                fields.extend(nested_fields)
-
-        return fields
-
-    @action(description=" ELASTIC_SEARCH:- Get distinct log levels in an index pattern")
-    def get_log_levels(self, index_pattern: str, field: str = "log.level") -> List[str]:
-        """
-        Get distinct log levels from the index
-
-        Args:
-            index_pattern: Index pattern to search
-            field: Field containing log level
-
-        Returns:
-            List of distinct log levels
-        """
-        payload = {
-            "size": 0,
-            "aggs": {
-                "log_levels": {
-                    "terms": {
-                        "field": field,
-                        "size": 20
-                    }
-                }
-            }
-        }
-
-        response = self._make_elasticsearch_request("POST", f"{index_pattern}/_search", payload)
-        return [bucket["key"] for bucket in response.get("aggregations", {}).get("log_levels", {}).get("buckets", [])]
-
-    @action(description="ELASTIC_SEARCH: search logs in a particular index pattern with a keyword and start_time and end_time")
-    def search_logs_by_keyword(
-            self,
-            index_pattern: str,
-            keyword: str,
-            start_time: Union[str, datetime],
-            end_time: Union[str, datetime],
-            size: int = 100,
-            exact_match: bool = False
-    ) -> Dict:
-        """
-        Search logs by keyword within a specified time range.
-
-        Args:
-            index_pattern: Index pattern to search
-            keyword: Keyword to search for
-            start_time: Start time (ISO format string or datetime object)
-            end_time: End time (ISO format string or datetime object)
-            size: Number of results to return
-            exact_match: If True, perform an exact match search across all fields
-
-        Returns:
-            Dictionary containing matching logs
-        """
-        # Convert datetime objects to ISO format if needed
-        if isinstance(start_time, datetime):
-            start_time = start_time.isoformat()
-        if isinstance(end_time, datetime):
-            end_time = end_time.isoformat()
-
-        # Build query
-        must_clauses = [
+        must_conditions = [
             {
                 "range": {
                     "@timestamp": {
-                        "gte": start_time,
-                        "lte": end_time
+                        "gte": start_time_iso,
+                        "lte": end_time_iso
                     }
                 }
             }
         ]
-
-        if exact_match:
-            # Perform exact match search using match_phrase
-            must_clauses.append({
-                "multi_match": {
-                    "query": keyword,
-                    "type": "phrase",  # Exact phrase match
-                    "fields": ["*"]  # Search in all fields
+        
+        if log_level:
+            must_conditions.append({
+                "match": {
+                    "log.level": log_level
                 }
             })
-        else:
-            # Perform full-text search
-            must_clauses.append({
-                "query_string": {
-                    "query": keyword
+            
+        if search_query:
+            must_conditions.append({
+                "match": {
+                    "message": search_query
                 }
             })
-
-        payload = {
+        
+        query = {
             "query": {
                 "bool": {
-                    "must": must_clauses
+                    "must": must_conditions
                 }
             },
-            "size": size,
-            "sort": [
-                {
-                    "@timestamp": {
-                        "order": "desc"
+            "sort": [{"@timestamp": {"order": "desc"}}],
+            "size": size
+        }
+        
+        if fields:
+            query["_source"] = fields
+        
+        path = f"/api/console/proxy?path={index_pattern}/_search&method=GET"
+        return self._make_request('POST', path, data=query)
+
+    @action(description="KIBANA API: Validate query. Supply a kql query, and returns if the query is valid, if not, also returns the error")
+    def validate_query(self, kql: str) -> (bool, Optional[dict]):
+        """Validate KQL using Kibana's API"""
+        try:
+            test_query = {
+                "query": {
+                    "query_string": {
+                        "query": kql,
+                        "analyze_wildcard": True
                     }
                 }
-            ]
-        }
+            }
+            # Use Kibana's _validate endpoint
+            response = self._make_request(
+                'POST',
+                '/api/console/proxy?path=_validate/query&method=GET',
+                data=test_query
+            )
+            return response["valid"], response.get("error")
+        except Exception as e:
+            return False, {"reason": str(e)}
 
-        return self._make_elasticsearch_request("POST", f"{index_pattern}/_search", payload)
-
-    @action(description="ELASTIC_SEARCH: check cluster health.")
-    def get_cluster_health(self) -> Dict:
-        """
-        Get Elasticsearch cluster health
-
-        Returns:
-            Cluster health information
-        """
-        return self._make_elasticsearch_request("GET", "_cluster/health")
-
-    @action(description="KIBANA: check kibana status.")
-    def get_kibana_status(self) -> Dict:
-        """
-        Get Kibana status
-
-        Returns:
-            Kibana status information
-        """
-        return self._make_kibana_request("GET", "status")
-
-    @action(description="ELASTIC_SEARCH: Check all available indexes.")
-    def get_elasticsearch_indices(self) -> List[str]:
-        """
-        Get all indices from Elasticsearch.
-
-        Returns:
-            List of index names
-        """
-        response = self._make_elasticsearch_request("GET", "_cat/indices?format=json")
-        return [index["index"] for index in response]
-
-
-# def main():
-#
+# # Example usage
+# if __name__ == "__main__":
+#     # Initialize client
 #     client = KibanaClient(
-#         elasticsearch_url="https://4fe97598a9ba4cbe95fbc3aadb9eeb6d.us-central1.gcp.cloud.es.io:443",
-#         kibana_url="https://test-aayush.kb.us-central1.gcp.cloud.es.io/",
-#         username="elastic",
-#         password="5l6CvYGDZ3sUjkwdkM0HXv7E"
+#         base_url=os.getenv("KIBANA_BASE_URL"),
+#         username=os.getenv("KIBANA_USERNAME"),
+#         password=os.getenv("KIBANA_PASSWORD")
 #     )
 #
-#     print("=====================================================================")
-#     print(f"Get logs: {client.execute_action("get_logs", {"index_pattern": "cloud-run-logs",
-#                                                             "start_time": datetime.utcnow() - timedelta(hours=5),
-#                                                             "end_time": datetime.utcnow()})}")
-#     print("=====================================================================")
-#
-#     print(f"Search logs: {client.execute_action("search_logs_by_keyword",
-#                                                 {"index_pattern": "cloud-run-logs",
-#                                                  "keyword": "karan no",
-#                                                  "start_time": datetime.utcnow() - timedelta(minutes=20),
-#                                                  "end_time": datetime.utcnow(),
-#                                                  "exact_match": True
-#                                                  })}")
-#
-#
-# if __name__ == "__main__":
-#     main()
+#     print(client.execute_action("validate_query", {"kql": "service.name:\"auth-service\" AND log.level:error"}))
+
+
+    # Get all index patterns
+    # print("Index Patterns:")
+    # index_patterns = client.get_index_patterns()
+    # for pattern in index_patterns:
+    #     print(f"- {pattern['attributes']['title']} (ID: {pattern['id']})")
+    #
+    # # Get error logs from last 7 days
+    # print("\nFetching error logs...")
+    # from datetime import datetime, timedelta
+    #
+    # end_time = datetime.utcnow()
+    # start_time = end_time - timedelta(days=7)
+
+    # logs = client.get_logs(
+    #     # index_pattern="logs-*",
+    #     index_pattern="api-logs*",
+    #     start_time=start_time,
+    #     end_time=end_time,
+    #     log_level="error",
+    #     # search_query="error",
+    #     fields=["@timestamp", "message", "log.level"],
+    #     size=50
+    # )
+    
+    # print(f"Found {len(logs.get('hits', {}).get('hits', []))} error logs")
+    # for idx, hit in enumerate(logs.get('hits', {}).get('hits', [])):
+    #     print(hit)
+    #     # break
+    #     # print(f"{hit['_source']['@timestamp']}: {hit['_source']['message']}")
