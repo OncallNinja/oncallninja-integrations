@@ -1,5 +1,5 @@
 import requests
-from typing import List, Dict, Optional, Union, Tuple
+from typing import List, Dict, Optional, Union, Tuple, Any
 from datetime import datetime, timedelta
 from .action_router import ActionRouter, action
 import logging 
@@ -74,7 +74,8 @@ class KibanaClient(ActionRouter):
         log_level: Optional[str] = None,
         search_query: Optional[str] = None,
         size: int = 100,
-        fields: Optional[List[str]] = None
+        fields: Optional[List[str]] = None,
+        aggregations: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """
         Get logs within a specified time range with optional filters.
@@ -145,13 +146,16 @@ class KibanaClient(ActionRouter):
                     "message": search_query
                 }
             })
-        
+
+        if not aggregations:
+            aggregations = {}
         query = {
             "query": {
                 "bool": {
                     "must": must_conditions
                 }
             },
+            "aggs": aggregations,
             "sort": [{"@timestamp": {"order": "desc"}}],
             "size": size
         }
