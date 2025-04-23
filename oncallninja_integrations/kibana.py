@@ -1,5 +1,8 @@
+import os
+from functools import lru_cache
+
 import requests
-from typing import List, Dict, Optional, Union, Tuple, Any
+from typing import List, Dict, Optional, Union, Any
 from datetime import datetime, timedelta
 from .action_router import ActionRouter, action
 import logging 
@@ -49,6 +52,7 @@ class KibanaClient(ActionRouter):
             raise Exception(f"Request failed: {str(e)}")
     
     @action(description="KIBANA API: Get index patterns.")
+    @lru_cache
     def get_index_patterns(self) -> List[Dict]:
         """
         Get all index patterns from Kibana.
@@ -65,7 +69,7 @@ class KibanaClient(ActionRouter):
         return result.get('saved_objects', [])
     
 
-    @action(description="KIBANA API: Get logs. Supply an index pattern, optionally start and end time, optional log_level, optional search query, and size (default set as 100). Maximum time window is 1 hours.")
+    @action(description="KIBANA API: Get logs. Supply an index pattern, optionally start and end time, optional log_level, optional search query, and size (default set as 100). Maximum time window is 1 day.")
     def get_logs(
         self,
         index_pattern: str,
@@ -73,13 +77,13 @@ class KibanaClient(ActionRouter):
         end_time: Union[str, datetime],
         log_level: Optional[str] = None,
         search_query: Optional[str] = None,
-        size: int = 100,
+        size: int = 1000,
         fields: Optional[List[str]] = None,
         aggregations: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """
         Get logs within a specified time range with optional filters.
-        If time window exceeds 1 hour, it will be automatically adjusted to 1 hour
+        If time window exceeds 1 day, it will be automatically adjusted to 1 day
         (looking forward from start_time or backward from end_time).
         
         Args:
@@ -107,13 +111,13 @@ class KibanaClient(ActionRouter):
         
         # Calculate time difference
         time_diff = end_dt - start_dt
-        max_window = timedelta(hours=1)
+        max_window = timedelta(days=1)
         
-        # Adjust time window if it exceeds 1 hour
+        # Adjust time window if it exceeds 1 day
         if time_diff > max_window:
             self.logger.warning(
-                f"Time window of {time_diff} exceeds maximum allowed 1 hour. "
-                f"Adjusting to 1 hour window ending at {end_dt.isoformat()}"
+                f"Time window of {time_diff} exceeds maximum allowed 1 day. "
+                f"Adjusting to 1 day window ending at {end_dt.isoformat()}"
             )
             start_dt = end_dt - max_window
         
@@ -136,7 +140,7 @@ class KibanaClient(ActionRouter):
         if log_level:
             must_conditions.append({
                 "match": {
-                    "log.level": log_level
+                    "error.log.level": log_level
                 }
             })
             
@@ -188,7 +192,119 @@ class KibanaClient(ActionRouter):
         except Exception as e:
             return False, {"reason": str(e)}
 
-# # Example usage
+    @action(description="Fetch count of logs")
+    def get_log_count(
+            self,
+            index_pattern: str,
+            query: Optional[str] = None,
+            start_time: Optional[datetime] = None,
+            end_time: Optional[datetime] = None
+    ) -> int:
+        """Get count of logs matching KQL within time range"""
+        # Base time range filter
+        time_filter = {
+            "range": {
+                "@timestamp": {
+                    "gte": start_time.isoformat() if start_time else "now-15m",
+                    "lte": end_time.isoformat() if end_time else "now"
+                }
+            }
+        }
+
+        # Build the complete query
+        count_query = {
+            "query": {
+                "bool": {
+                    "must": [time_filter]
+                }
+            }
+        }
+
+        if query:
+            # Add KQL as query_string filter
+            count_query["query"]["bool"]["must"].append({
+                "query_string": {
+                    "query": query,
+                    "analyze_wildcard": True,
+                    "default_field": "*"
+                }
+            })
+
+        path = f"/api/console/proxy?path=/{index_pattern}/_count&method=GET"
+        response = self._make_request('POST', path, data=count_query)
+        return response.get('count', 0)
+
+    @action(description="Fetch all available queryable fields for the given index pattern")
+    @lru_cache
+    def get_available_fields(self, index_pattern: str) -> set:
+        """Get fields using legacy Kibana index patterns API"""
+        try:
+            response = self._make_request(
+                'GET',
+                f'/api/index_patterns/_fields_for_wildcard',
+                params={
+                    "pattern": index_pattern,
+                    "meta_fields": ["_source", "_id", "_index", "_score"],
+                    "type": "index_pattern",
+                    "rollup_index": "",
+                    "allow_no_index": True
+                }
+            )
+            return {field['name'] for field in response['fields']}
+        except Exception as e:
+            print(f"Field fetch failed: {str(e)}")
+            return set()
+
+    @action(description="Fetch fields from a sample log")
+    def get_available_fields_from_sample(self, index_pattern: str, size=1) -> set:
+        """Get fields by sampling documents from the index"""
+        try:
+            # Get a sample document
+            response = self.get_logs(index_pattern, start_time=datetime.utcnow() - timedelta(days=1), end_time=datetime.utcnow(), size=1)
+
+            fields = set()
+
+            # Process hits
+            if 'hits' in response and 'hits' in response['hits']:
+                for hit in response['hits']['hits']:
+                    # Add metadata fields
+                    for meta_field in ["_id", "_index", "_score"]:
+                        if meta_field in hit:
+                            fields.add(meta_field)
+
+                    # Add source fields recursively
+                    if '_source' in hit:
+                        fields.add("_source")
+                        source_fields = self._extract_fields_from_doc(hit['_source'])
+                        fields.update(source_fields)
+
+            return fields
+        except Exception as e:
+            print(f"Field fetch failed: {str(e)}")
+            return set()
+
+    def _extract_fields_from_doc(self, doc, parent_path=""):
+        """Extract field names recursively from a document"""
+        fields = set()
+
+        if isinstance(doc, dict):
+            for key, value in doc.items():
+                full_path = f"{parent_path}.{key}" if parent_path else key
+                fields.add(full_path)
+
+                # Recurse into nested objects
+                if isinstance(value, (dict, list)):
+                    nested_fields = self._extract_fields_from_doc(value, full_path)
+                    fields.update(nested_fields)
+
+        elif isinstance(doc, list) and doc and isinstance(doc[0], dict):
+            # For arrays of objects, process the first element
+            nested_fields = self._extract_fields_from_doc(doc[0], parent_path)
+            fields.update(nested_fields)
+
+        return fields
+
+# Example usage
 # if __name__ == "__main__":
 #     # Initialize client
 #     client = KibanaClient(
@@ -197,35 +313,54 @@ class KibanaClient(ActionRouter):
 #         password=os.getenv("KIBANA_PASSWORD")
 #     )
 #
-#     print(client.execute_action("validate_query", {"kql": "service.name:\"auth-service\" AND log.level:error"}))
+#     # print(client.execute_action("get_available_fields", {"index_pattern": "api-logs*"}))
+#     # print(client.execute_action("get_available_fields_from_sample", {"index_pattern": "api-logs*"}))
+#     print(client.execute_action(
+#                                "get_log_count",
+#                                {"index_pattern": "api-logs*",
+#                                 "query": "error_reason.keyword : \"Avanto export fail\" OR error_reason.keyword : \"inference fail\"",
+#                                 "start_time": datetime.fromisoformat('2025-04-23T06:04:35.120209'),
+#                                 "end_time": datetime.fromisoformat('2025-04-23T06:19:35.120220')}))
 
 
-    # Get all index patterns
-    # print("Index Patterns:")
-    # index_patterns = client.get_index_patterns()
-    # for pattern in index_patterns:
-    #     print(f"- {pattern['attributes']['title']} (ID: {pattern['id']})")
-    #
-    # # Get error logs from last 7 days
-    # print("\nFetching error logs...")
-    # from datetime import datetime, timedelta
-    #
-    # end_time = datetime.utcnow()
-    # start_time = end_time - timedelta(days=7)
-
+# # "https://logs.nanonets.com/api/log_entries/summary"
+#
+#
+#     # Get all index patterns
+#     # print("Index Patterns:")
+#     # index_patterns = client.get_index_patterns()
+#     # for pattern in index_patterns:
+#     #     print(f"- {pattern['attributes']['title']} (ID: {pattern['id']})")
+#     #
+#     # Get error logs from last 7 days
+#     # print("\nFetching error logs...")
+#     # from datetime import datetime, timedelta
+#     #
+#     end_time = datetime.utcnow()
+#     start_time = end_time - timedelta(days=7)
+#
+#     count = client.get_log_count(
+#         index_pattern="python-logs*",
+#         start_time=start_time,
+#         end_time=end_time,
+#     )
+#     print(f"Log count {count}")
     # logs = client.get_logs(
     #     # index_pattern="logs-*",
     #     index_pattern="api-logs*",
     #     start_time=start_time,
     #     end_time=end_time,
-    #     log_level="error",
+    #     # log_level="error",
     #     # search_query="error",
-    #     fields=["@timestamp", "message", "log.level"],
+    #     # fields=["@timestamp", "message"],
     #     size=50
     # )
-    
+
+    # print(logs)
+    #
+    #
     # print(f"Found {len(logs.get('hits', {}).get('hits', []))} error logs")
     # for idx, hit in enumerate(logs.get('hits', {}).get('hits', [])):
     #     print(hit)
-    #     # break
-    #     # print(f"{hit['_source']['@timestamp']}: {hit['_source']['message']}")
+        # break
+        # print(f"{hit['_source']['@timestamp']}: {hit['_source']['message']}")
