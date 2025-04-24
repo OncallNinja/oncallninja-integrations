@@ -253,6 +253,29 @@ class KibanaNewClient(ActionRouter):
 
         return sorted(fields)
 
+    @action(
+        description="KIBANA API: Validate query. Supply a query string, and returns if the query is valid, if not, also returns the error")
+    def validate_query(self, query_string: str) -> (bool, Optional[dict]):
+        """Validate KQL using Kibana's API"""
+        try:
+            test_query = {
+                "query": {
+                    "query_string": {
+                        "query": query_string,
+                        "analyze_wildcard": True
+                    }
+                }
+            }
+            # Use Kibana's _validate endpoint
+            response = self._make_elasticsearch_request(
+                'GET',
+                '_validate/query',
+                test_query
+            )
+            return response["valid"], response.get("error")
+        except Exception as e:
+            return False, {"reason": str(e)}
+
     def _extract_fields_from_properties(self, properties, parent=""):
         """
         Recursively extract fields from Elasticsearch mapping properties
@@ -409,13 +432,13 @@ class KibanaNewClient(ActionRouter):
 
 # def main():
 #
-#     client = KibanaClient(
-#         elasticsearch_url="https://4fe97598a9ba4cbe95fbc3aadb9eeb6d.us-central1.gcp.cloud.es.io:443",
-#         kibana_url="https://test-aayush.kb.us-central1.gcp.cloud.es.io/",
-#         username="elastic",
-#         password="5l6CvYGDZ3sUjkwdkM0HXv7E"
+#     client = KibanaNewClient(
+#         cloud_id="",
+#         api_key=""
 #     )
-#
+# #
+#     print(f"Validate logs: {client.execute_action("validate_query", {"kql": "message:(*Avanto* AND *export* AND *inference*) AND (event.outcome:failure OR log.level:error OR error.message:*)"})}")
+
 #     print("=====================================================================")
 #     print(f"Get logs: {client.execute_action("get_logs", {"index_pattern": "cloud-run-logs",
 #                                                             "start_time": datetime.utcnow() - timedelta(hours=5),
