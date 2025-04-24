@@ -67,7 +67,33 @@ class KibanaClient(ActionRouter):
         }
         result = self._make_request('GET', path, params=params)
         return result.get('saved_objects', [])
-    
+
+    @action(description="Get logs using KQL query")
+    def get_logs_kql(
+            self,
+            kql: dict
+    ) -> Dict:
+        """
+        Get logs within a specified time range with optional filters.
+        If time window exceeds 1 day, it will be automatically adjusted to 1 day
+        (looking forward from start_time or backward from end_time).
+
+        Args:
+            index_pattern: The index pattern to search (e.g., "python-logs-*")
+            start_time: Start time (ISO format string or datetime object)
+            end_time: End time (ISO format string or datetime object)
+            log_level: Filter by log level (e.g., "error", "info")
+            search_query: Optional text to search in log messages
+            size: Maximum number of logs to return
+            fields: List of fields to include in response
+
+        Returns:
+            Dictionary containing the search results
+        """
+
+        path = f"/api/console/proxy?path=_search&method=GET"
+        return self._make_request('POST', path, data=kql)
+
 
     @action(description="KIBANA API: Get logs. Supply an index pattern, optionally start and end time, optional log_level, optional search query, and size (default set as 100). Maximum time window is 1 day.")
     def get_logs(
@@ -77,7 +103,7 @@ class KibanaClient(ActionRouter):
         end_time: Union[str, datetime],
         log_level: Optional[str] = None,
         search_query: Optional[str] = None,
-        size: int = 1000,
+        size: int = 5000,
         fields: Optional[List[str]] = None,
         aggregations: Optional[Dict[str, Any]] = None,
     ) -> Dict:
@@ -146,8 +172,10 @@ class KibanaClient(ActionRouter):
             
         if search_query:
             must_conditions.append({
-                "match": {
-                    "message": search_query
+                "query_string": {
+                    "query": search_query,
+                    "analyze_wildcard": True,
+                    "default_field": "error.exception.message"
                 }
             })
 
@@ -196,41 +224,69 @@ class KibanaClient(ActionRouter):
     def get_log_count(
             self,
             index_pattern: str,
-            query: Optional[str] = None,
-            start_time: Optional[datetime] = None,
-            end_time: Optional[datetime] = None
+            start_time: Union[str, datetime],
+            end_time: Union[str, datetime],
+            query: Optional[str] = None
     ) -> int:
         """Get count of logs matching KQL within time range"""
         # Base time range filter
-        time_filter = {
-            "range": {
-                "@timestamp": {
-                    "gte": start_time.isoformat() if start_time else "now-15m",
-                    "lte": end_time.isoformat() if end_time else "now"
-                }
-            }
-        }
+        if isinstance(start_time, str):
+            start_dt = datetime.fromisoformat(start_time)
+        else:
+            start_dt = start_time
 
-        # Build the complete query
-        count_query = {
-            "query": {
-                "bool": {
-                    "must": [time_filter]
+        if isinstance(end_time, str):
+            end_dt = datetime.fromisoformat(end_time)
+        else:
+            end_dt = end_time
+
+        # Calculate time difference
+        time_diff = end_dt - start_dt
+        max_window = timedelta(days=1)
+
+        # Adjust time window if it exceeds 1 day
+        if time_diff > max_window:
+            self.logger.warning(
+                f"Time window of {time_diff} exceeds maximum allowed 1 day. "
+                f"Adjusting to 1 day window ending at {end_dt.isoformat()}"
+            )
+            start_dt = end_dt - max_window
+
+        # Convert back to ISO format strings for the query
+        start_time_iso = start_dt.isoformat()
+        end_time_iso = end_dt.isoformat()
+
+        # Build the query
+        must_conditions = [
+            {
+                "range": {
+                    "@timestamp": {
+                        "gte": start_time_iso,
+                        "lte": end_time_iso
+                    }
                 }
             }
-        }
+        ]
+
 
         if query:
-            # Add KQL as query_string filter
-            count_query["query"]["bool"]["must"].append({
+            must_conditions.append({
                 "query_string": {
                     "query": query,
                     "analyze_wildcard": True,
-                    "default_field": "*"
+                    "default_field": "error.exception.message"
                 }
             })
 
-        path = f"/api/console/proxy?path=/{index_pattern}/_count&method=GET"
+        count_query = {
+            "query": {
+                "bool": {
+                    "must": must_conditions
+                }
+            },
+        }
+
+        path = f"/api/console/proxy?path={index_pattern}/_count&method=GET"
         response = self._make_request('POST', path, data=count_query)
         return response.get('count', 0)
 
@@ -244,7 +300,7 @@ class KibanaClient(ActionRouter):
                 f'/api/index_patterns/_fields_for_wildcard',
                 params={
                     "pattern": index_pattern,
-                    "meta_fields": ["_source", "_id", "_index", "_score"],
+                    "meta_fields": ["_source"],
                     "type": "index_pattern",
                     "rollup_index": "",
                     "allow_no_index": True
@@ -304,7 +360,7 @@ class KibanaClient(ActionRouter):
 
         return fields
 
-# Example usage
+# # Example usage
 # if __name__ == "__main__":
 #     # Initialize client
 #     client = KibanaClient(
@@ -312,15 +368,35 @@ class KibanaClient(ActionRouter):
 #         username=os.getenv("KIBANA_USERNAME"),
 #         password=os.getenv("KIBANA_PASSWORD")
 #     )
-#
-#     # print(client.execute_action("get_available_fields", {"index_pattern": "api-logs*"}))
-#     # print(client.execute_action("get_available_fields_from_sample", {"index_pattern": "api-logs*"}))
-#     print(client.execute_action(
-#                                "get_log_count",
-#                                {"index_pattern": "api-logs*",
-#                                 "query": "error_reason.keyword : \"Avanto export fail\" OR error_reason.keyword : \"inference fail\"",
-#                                 "start_time": datetime.fromisoformat('2025-04-23T06:04:35.120209'),
-#                                 "end_time": datetime.fromisoformat('2025-04-23T06:19:35.120220')}))
+
+    # print(client.execute_action("get_available_fields", {"index_pattern": "api-logs*"}))
+    # print(client.execute_action("get_available_fields_from_sample", {"index_pattern": "api-logs*"}))
+    # logs = client.execute_action(
+    #                            "get_logs",
+    #                            {"index_pattern": ".ds-logs-apm*",
+    #                             "search_query": "error: list index out of range",
+    #                             "start_time": datetime(2025, 4, 23, 15, 28, 43, 828019),
+    #                             "end_time": datetime(2025, 4, 23, 15, 33, 13, 828024),
+    #                             "fields": ["@timestamp", "error"],
+    #                             "size": 5})
+    # print(logs)
+    #
+    # print(f"Found {len(logs.get('data', {}).get('hits', {}).get('hits', []))} error logs")
+
+    # logs = client.execute_action(
+    #                            "get_logs_kql",
+    #                            {"kql": {
+    #                                "query": {
+    #                                    "match": {
+    #                                        "_index": "api-logs*"
+    #                                    }
+    #                                },
+    #                                "size": 1
+    #                            },
+    #                             "size": 5})
+    # print(logs)
+    #
+    # print(f"Found {len(logs.get('data', {}).get('hits', {}).get('hits', []))} error logs")
 
 
 # # "https://logs.nanonets.com/api/log_entries/summary"
@@ -345,22 +421,22 @@ class KibanaClient(ActionRouter):
 #         end_time=end_time,
 #     )
 #     print(f"Log count {count}")
-    # logs = client.get_logs(
-    #     # index_pattern="logs-*",
-    #     index_pattern="api-logs*",
-    #     start_time=start_time,
-    #     end_time=end_time,
-    #     # log_level="error",
-    #     # search_query="error",
-    #     # fields=["@timestamp", "message"],
-    #     size=50
-    # )
-
-    # print(logs)
-    #
-    #
-    # print(f"Found {len(logs.get('hits', {}).get('hits', []))} error logs")
-    # for idx, hit in enumerate(logs.get('hits', {}).get('hits', [])):
-    #     print(hit)
-        # break
-        # print(f"{hit['_source']['@timestamp']}: {hit['_source']['message']}")
+#     logs = client.get_logs(
+#         # index_pattern="logs-*",
+#         index_pattern="api-logs*",
+#         start_time=start_time,
+#         end_time=end_time,
+#         # log_level="error",
+#         # search_query="error",
+#         # fields=["@timestamp", "message"],
+#         size=50
+#     )
+#
+#     # print(logs)
+#
+#
+#     print(f"Found {len(logs.get('hits', {}).get('hits', []))} error logs")
+#     for idx, hit in enumerate(logs.get('hits', {}).get('hits', [])):
+#         print(hit)
+#         # break
+#         # print(f"{hit['_source']['@timestamp']}: {hit['_source']['message']}")
