@@ -175,7 +175,7 @@ class BitbucketClient(CodingClient):
         }
 
     @action(description="Gets recent commits made to the repository, default limit: 10")
-    def get_recent_commits(self, org_name: Optional[str], repo_name: str, limit: int = 10) -> List[Dict[str, Any]]:
+    def get_recent_commits(self, org_name: Optional[str], repo_name: str, limit: Optional[int] = 10) -> List[Dict[str, Any]]:
         """Get recent commits for a repository."""
         if "/" in repo_name:
             # If full path is provided (org_name/repo)
@@ -185,6 +185,9 @@ class BitbucketClient(CodingClient):
             if not org_name:
                 raise ValueError("Workspace must be provided if repo_name doesn't include it")
             repo_slug = repo_name
+
+        if isinstance(limit, str):
+            limit = int(limit)
 
         url = f"/repositories/{org_name}/{repo_slug}/commits"
 
