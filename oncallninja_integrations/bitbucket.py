@@ -1,6 +1,7 @@
 import logging
 import os
 import subprocess
+from datetime import datetime, timezone # Added for timestamp comparison
 
 import requests
 from typing import List, Dict, Any, Optional
@@ -16,12 +17,14 @@ class BitbucketConfig(BaseModel):
     api_url: str = Field("https://api.bitbucket.org/2.0", description="Bitbucket API URL")
     work_dir: str = Field("/tmp/oncallninja-repos", description="Working directory for cloning repos")
     max_commits_to_analyze: int = Field(10, description="Maximum number of recent commits to analyze")
+    issue_timestamp: Optional[str] = Field(None, description="Timestamp of the related issue for context") # Added
 
 class BitbucketClient(CodingClient):
     def __init__(self, config: BitbucketConfig):
         super().__init__(config.work_dir)
         self.logger = logging.getLogger(__name__)
         self.config = config
+        self.issue_timestamp = config.issue_timestamp # Store the timestamp
         # Bitbucket uses Basic Auth with username and app password
         self.headers = {
             "Authorization": f"Bearer {config.access_token}",
@@ -211,7 +214,82 @@ class BitbucketClient(CodingClient):
 
         return commits
 
-    def clone_repository(self, org_name: Optional[str], repo_name: str) -> str:
+    def get_commit_before_timestamp(self, workspace: str, repo_slug: str, timestamp_str: str) -> Optional[str]:
+        """
+        Find the hash of the latest commit made strictly before the given timestamp.
+
+        Args:
+            workspace: The workspace containing the repository.
+            repo_slug: The slug of the repository.
+            timestamp_str: The timestamp string (format 'YYYY-MM-DD HH:MM:SS') to compare against.
+
+        Returns:
+            The commit hash as a string, or None if no commit is found before the timestamp.
+        """
+        self.logger.info(f"Searching for commit before '{timestamp_str}' in {workspace}/{repo_slug}")
+
+        try:
+            # Parse the input timestamp string (assuming naive local time) and make it UTC
+            # Bitbucket API returns dates in ISO 8601 format with timezone (usually UTC)
+            target_dt_naive = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+            # Assuming the input timestamp is local, convert to UTC for comparison
+            # If the input is already UTC, this might need adjustment or clarification
+            target_dt_utc = target_dt_naive.replace(tzinfo=timezone.utc) # Simplistic assumption: treat input as UTC
+            self.logger.debug(f"Target timestamp parsed to UTC: {target_dt_utc.isoformat()}")
+
+        except ValueError as e:
+            self.logger.error(f"Error parsing input timestamp '{timestamp_str}': {e}")
+            return None
+
+        endpoint = f"/repositories/{workspace}/{repo_slug}/commits"
+        params = {"pagelen": 50, "sort": "-date"} # Request 50 commits per page, sorted newest first
+
+        while endpoint:
+            try:
+                self.logger.debug(f"Fetching commits from endpoint: {endpoint}")
+                response = self._make_request(endpoint, params=params)
+                commits_data = response.get("values", [])
+                if not commits_data:
+                    self.logger.info("No more commits found.")
+                    break # No commits on this page
+
+                for commit in commits_data:
+                    commit_hash = commit.get("hash")
+                    commit_date_str = commit.get("date")
+                    if not commit_date_str or not commit_hash:
+                        self.logger.warning(f"Skipping commit with missing date or hash: {commit}")
+                        continue
+
+                    try:
+                        # Parse commit date (ISO 8601 format)
+                        commit_dt = datetime.fromisoformat(commit_date_str.replace("Z", "+00:00"))
+                        self.logger.debug(f"Comparing commit {commit_hash} ({commit_dt.isoformat()}) with target {target_dt_utc.isoformat()}")
+
+                        # Compare timezone-aware datetimes
+                        if commit_dt < target_dt_utc:
+                            self.logger.info(f"Found commit {commit_hash} before target timestamp.")
+                            return commit_hash
+                    except ValueError as e:
+                        self.logger.error(f"Error parsing commit date '{commit_date_str}' for commit {commit_hash}: {e}")
+                        continue # Skip commit if date parsing fails
+
+                # Prepare for next page
+                endpoint = response.get("next")
+                params = None # 'next' URL includes parameters
+                self.logger.debug(f"Moving to next page: {endpoint}")
+
+            except requests.exceptions.RequestException as e:
+                self.logger.error(f"API error fetching commits: {e}")
+                return None # Stop searching on API error
+            except Exception as e:
+                self.logger.error(f"Unexpected error processing commits: {e}")
+                return None # Stop on unexpected errors
+
+        self.logger.info(f"No commit found strictly before {timestamp_str} in {workspace}/{repo_slug}")
+        return None
+
+
+    def clone_repository(self, workspace: Optional[str], repo_name: str) -> str:
         """Clone a repository and return the local path."""
         if "/" in repo_name:
             # If full path is provided (org_name/repo)
@@ -258,6 +336,31 @@ class BitbucketClient(CodingClient):
             subprocess.run(["git", "remote", "set-url", "origin", clean_url], check=True)
             # Configure credential helper
             subprocess.run(["git", "config", "--local", "credential.helper", "cache"], check=True)
+
+        # --- Checkout specific commit based on timestamp ---
+        if self.issue_timestamp:
+            self.logger.info(f"Issue timestamp provided ({self.issue_timestamp}), attempting to find commit before this time.")
+            commit_hash_to_checkout = self.get_commit_before_timestamp(workspace, repo_slug, self.issue_timestamp)
+
+            if commit_hash_to_checkout:
+                self.logger.info(f"Checking out commit: {commit_hash_to_checkout}")
+                try:
+                    # Ensure we are in the correct directory before checkout
+                    os.chdir(local_path)
+                    subprocess.run(["git", "checkout", commit_hash_to_checkout], check=True, capture_output=True)
+                    self.logger.info(f"Successfully checked out commit {commit_hash_to_checkout}")
+                except subprocess.CalledProcessError as e:
+                    self.logger.error(f"Failed to checkout commit {commit_hash_to_checkout}: {e}")
+                    self.logger.error(f"Git stderr: {e.stderr.decode()}")
+                    # Decide if we should raise an error or just log and return the path
+                    # For now, log the error and continue, returning the path to the repo head
+                except Exception as e:
+                     self.logger.error(f"An unexpected error occurred during checkout: {e}")
+            else:
+                self.logger.warning(f"Could not find a commit before {self.issue_timestamp}. Repository remains at the latest commit.")
+        else:
+             self.logger.info("No issue timestamp provided, repository remains at the latest commit.")
+        # --- End Checkout ---
 
         return local_path
 
