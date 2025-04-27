@@ -386,7 +386,23 @@ class KibanaClient(ActionRouter):
         """Get fields by sampling documents from the index"""
         try:
             # Get a sample document
-            response = self.get_logs(index_pattern, start_time=datetime.utcnow() - timedelta(days=1), end_time=datetime.utcnow(), size=1)
+            query = {
+                "query": {
+                    "bool": {
+                        "must": [
+                            {
+                                "range": {
+                                    "@timestamp": self._convert_to_iso_range(start_time=datetime.utcnow() - timedelta(hours=1), end_time=datetime.utcnow())
+                                }
+                            }
+                        ]
+                    }
+                },
+                "size": size
+            }
+            path = f"/api/console/proxy?path={index_pattern}/_search&method=GET"
+            response = self._make_request('POST', path, data=query)
+            # response = self.get_logs(index_pattern, start_time=datetime.utcnow() - timedelta(days=1), end_time=datetime.utcnow(), field_filters=None, size=1)
 
             fields = set()
 
@@ -440,8 +456,8 @@ if __name__ == "__main__":
     )
 
     # print(client.execute_action("fetch_logs_by_kql", {"index_pattern": "api-logs*", "kql_query": 'level:error AND (msg:"Can\'t import files since model has been deleted" OR msg:"Hello!") AND nanonets_api_server', "start_time": datetime(2025, 4, 26, 13, 27, 30, 828019), "end_time": datetime(2025, 4, 26, 13, 28, 13, 828024)}))
-    print(client.execute_action("get_available_fields", {"index_pattern": "api-logs*"}))
-    # print(client.execute_action("get_available_fields_from_sample", {"index_pattern": "api-logs*"}))
+    # print(client.execute_action("get_available_fields", {"index_pattern": "api-logs*"}))
+    print(client.execute_action("get_available_fields_from_sample", {"index_pattern": "api-logs*"}))
     # logs = client.execute_action(
     #                            "get_logs",
     #                            {"index_pattern": "api-logs*",
