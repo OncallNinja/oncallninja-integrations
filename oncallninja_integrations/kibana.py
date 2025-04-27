@@ -151,7 +151,7 @@ class KibanaClient(ActionRouter):
         path = f"/api/console/proxy?path={index_pattern}/_count&method=GET"
         response = self._make_request('POST', path, data=count_query)
         log_count = response.get('count', 0)
-        if log_count > self.max_allowed_hits:
+        if log_count > self.max_allowed_hits and size > self.max_allowed_hits:
             raise Exception(f"Query would return too many logs ({log_count}). Maximum allowed is {self.max_allowed_hits}. Please refine your query.")
 
         if log_count == 0:
@@ -192,7 +192,7 @@ class KibanaClient(ActionRouter):
         count_path = f"/api/console/proxy?path={encoded_index_pattern}/_count&method=GET"
         count_result = self._make_request('POST', count_path, data={"query": query["query"]})
         log_count = count_result.get("count", 0)
-        if log_count > self.max_allowed_hits:
+        if log_count > self.max_allowed_hits and size > self.max_allowed_hits:
             raise Exception(
                 f"Query would return too many logs ({log_count}). Maximum allowed is {self.max_allowed_hits}. Please refine your query.")
         if log_count == 0:
