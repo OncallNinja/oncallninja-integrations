@@ -370,7 +370,7 @@ class KibanaClient(ActionRouter):
                 f'/api/index_patterns/_fields_for_wildcard',
                 params={
                     "pattern": index_pattern,
-                    "meta_fields": ["_source"],
+                    "meta_fields": ["_source", "_id", "_index", "_score"],
                     "type": "index_pattern",
                     "rollup_index": "",
                     "allow_no_index": True
@@ -431,16 +431,16 @@ class KibanaClient(ActionRouter):
         return fields
 
 # Example usage
-# if __name__ == "__main__":
-#     # Initialize client
-#     client = KibanaClient(
-#         base_url=os.getenv("KIBANA_BASE_URL"),
-#         username=os.getenv("KIBANA_USERNAME"),
-#         password=os.getenv("KIBANA_PASSWORD")
-#     )
-#
-#     print(client.execute_action("fetch_logs_by_kql", {"index_pattern": "api-logs*", "kql_query": 'level:error AND (msg:"Can\'t import files since model has been deleted" OR msg:"Hello!") AND nanonets_api_server', "start_time": datetime(2025, 4, 26, 13, 27, 30, 828019), "end_time": datetime(2025, 4, 26, 13, 28, 13, 828024)}))
-    # print(client.execute_action("get_available_fields", {"index_pattern": "api-logs*"}))
+if __name__ == "__main__":
+    # Initialize client
+    client = KibanaClient(
+        base_url=os.getenv("KIBANA_BASE_URL"),
+        username=os.getenv("KIBANA_USERNAME"),
+        password=os.getenv("KIBANA_PASSWORD")
+    )
+
+    # print(client.execute_action("fetch_logs_by_kql", {"index_pattern": "api-logs*", "kql_query": 'level:error AND (msg:"Can\'t import files since model has been deleted" OR msg:"Hello!") AND nanonets_api_server', "start_time": datetime(2025, 4, 26, 13, 27, 30, 828019), "end_time": datetime(2025, 4, 26, 13, 28, 13, 828024)}))
+    print(client.execute_action("get_available_fields", {"index_pattern": "api-logs*"}))
     # print(client.execute_action("get_available_fields_from_sample", {"index_pattern": "api-logs*"}))
     # logs = client.execute_action(
     #                            "get_logs",
