@@ -214,19 +214,19 @@ class BitbucketClient(CodingClient):
 
         return commits
 
-    def get_commit_before_timestamp(self, workspace: str, repo_slug: str, timestamp_str: str) -> Optional[str]:
+    def get_commit_before_timestamp(self, org_name: str, repo_slug: str, timestamp_str: str) -> Optional[str]:
         """
         Find the hash of the latest commit made strictly before the given timestamp.
 
         Args:
-            workspace: The workspace containing the repository.
+            org_name: The org_name containing the repository.
             repo_slug: The slug of the repository.
             timestamp_str: The timestamp string (format 'YYYY-MM-DD HH:MM:SS') to compare against.
 
         Returns:
             The commit hash as a string, or None if no commit is found before the timestamp.
         """
-        self.logger.info(f"Searching for commit before '{timestamp_str}' in {workspace}/{repo_slug}")
+        self.logger.info(f"Searching for commit before '{timestamp_str}' in {org_name}/{repo_slug}")
 
         try:
             # Parse the input timestamp string (assuming naive local time) and make it UTC
@@ -241,7 +241,7 @@ class BitbucketClient(CodingClient):
             self.logger.error(f"Error parsing input timestamp '{timestamp_str}': {e}")
             return None
 
-        endpoint = f"/repositories/{workspace}/{repo_slug}/commits"
+        endpoint = f"/repositories/{org_name}/{repo_slug}/commits"
         params = {"pagelen": 50, "sort": "-date"} # Request 50 commits per page, sorted newest first
 
         while endpoint:
@@ -285,11 +285,11 @@ class BitbucketClient(CodingClient):
                 self.logger.error(f"Unexpected error processing commits: {e}")
                 return None # Stop on unexpected errors
 
-        self.logger.info(f"No commit found strictly before {timestamp_str} in {workspace}/{repo_slug}")
+        self.logger.info(f"No commit found strictly before {timestamp_str} in {org_name}/{repo_slug}")
         return None
 
 
-    def clone_repository(self, workspace: Optional[str], repo_name: str) -> str:
+    def clone_repository(self, org_name: Optional[str], repo_name: str) -> str:
         """Clone a repository and return the local path."""
         if "/" in repo_name:
             # If full path is provided (org_name/repo)
@@ -340,7 +340,7 @@ class BitbucketClient(CodingClient):
         # --- Checkout specific commit based on timestamp ---
         if self.issue_timestamp:
             self.logger.info(f"Issue timestamp provided ({self.issue_timestamp}), attempting to find commit before this time.")
-            commit_hash_to_checkout = self.get_commit_before_timestamp(workspace, repo_slug, self.issue_timestamp)
+            commit_hash_to_checkout = self.get_commit_before_timestamp(org_name, repo_slug, self.issue_timestamp)
 
             if commit_hash_to_checkout:
                 self.logger.info(f"Checking out commit: {commit_hash_to_checkout}")
