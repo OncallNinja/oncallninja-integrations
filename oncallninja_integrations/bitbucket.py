@@ -13,7 +13,7 @@ from .code_client import CodingClient
 log = logging.getLogger(__name__)
 
 class BitbucketConfig(BaseModel):
-    access_token: str = Field(..., description="Bitbucket access token")
+    access_tokens: Dict[str, str] = Field(..., description="Map of repository names to their Bitbucket access tokens")
     api_url: str = Field("https://api.bitbucket.org/2.0", description="Bitbucket API URL")
     work_dir: str = Field("/tmp/oncallninja-repos", description="Working directory for cloning repos")
     max_commits_to_analyze: int = Field(10, description="Maximum number of recent commits to analyze")
@@ -26,14 +26,26 @@ class BitbucketClient(CodingClient):
         self.config = config
         self.issue_timestamp = config.issue_timestamp # Store the timestamp
         # Bitbucket uses Basic Auth with username and app password
-        self.headers = {
-            "Authorization": f"Bearer {config.access_token}",
-            "Accept": "application/json"
-        }
+        self.token_map = config.access_tokens
+        # Initialize with empty headers, will be set per request
+        self.headers = {"Accept": "application/json", "Content-Type": "application/json"}
         os.makedirs(self.config.work_dir, exist_ok=True)
 
-    @action(description="Make a request to the Bitbucket API endpoint with the given params and data")
-    def _make_request(self, endpoint: str, params: Dict = None, method: str = "GET", data: Dict = None) -> Any:
+    def _get_token_for_org(self, repo_name: str) -> str:
+        """Get the access token for a specific repository."""
+        if repo_name not in self.token_map:
+            raise ValueError(f"No access token found for repository: {repo_name}")
+        return self.token_map[repo_name]
+
+    def _get_headers_for_org(self, repo_name: str) -> Dict[str, str]:
+        """Get headers with appropriate token for a repository."""
+        token = self._get_token_for_org(repo_name)
+        return {
+            **self.headers,
+            "Authorization": f"Bearer {token}"
+        }
+
+    def _make_request(self, org_name: str, endpoint: str, params: Dict = None, method: str = "GET", data: Dict = None) -> Any:
         """
         Make a request to the Bitbucket API.
 
@@ -42,6 +54,7 @@ class BitbucketClient(CodingClient):
             params: Query parameters
             method: HTTP method (GET, POST, PUT, DELETE)
             data: Request body for POST, PUT requests
+            org_name: Repository name to determine which token to use
 
         Returns:
             Response JSON as dictionary
@@ -49,8 +62,8 @@ class BitbucketClient(CodingClient):
 
         url = endpoint if self.config.api_url in endpoint else f"{self.config.api_url}{endpoint}"
 
-        headers = self.headers.copy()  # Create a copy to avoid modifying the original
-        headers["Content-Type"] = "application/json"
+        # Use repo-specific headers if repo_name is provided
+        headers = self._get_headers_for_org(org_name) if org_name else self.headers
 
         try:
             if method == "GET":
@@ -86,23 +99,24 @@ class BitbucketClient(CodingClient):
         all_org_names = set()
 
         endpoint = "/repositories?role=member"
-        while True:
-            response = self._make_request(endpoint, params=params)
-            values = response.get("values", [])
+        for org in self.token_map:
+            while True:
+                response = self._make_request(org, endpoint, params=params)
+                values = response.get("values", [])
 
-            for repo in values:
-                if repo.get("is_private") and not repo.get("has_access", True):
-                    continue
-                all_org_names.add(repo.get("full_name").split("/")[0])
+                for org in values:
+                    if org.get("is_private") and not org.get("has_access", True):
+                        continue
+                    all_org_names.add(org.get("full_name").split("/")[0])
 
-            # Handle pagination
-            next_page = response.get("next")
-            if not next_page:
-                break
+                # Handle pagination
+                next_page = response.get("next")
+                if not next_page:
+                    break
 
-            # For next page, we use the full URL
-            params = None
-            endpoint = next_page
+                # For next page, we use the full URL
+                params = None
+                endpoint = next_page
 
         return list(all_org_names)
 
@@ -119,33 +133,36 @@ class BitbucketClient(CodingClient):
         params = {"pagelen": 100}  # Maximum allowed per page
         all_repos = []
 
-        while True:
-            response = self._make_request(endpoint, params=params)
-            values = response.get("values", [])
+        for org in self.token_map:
+            if filter_org_name and org != filter_org_name:
+                continue
+            while True:
+                response = self._make_request(org, endpoint, params=params)
+                values = response.get("values", [])
 
-            repos = []
-            for repo in values:
-                if repo.get("is_private") and not repo.get("has_access", True):
-                    continue
-                repos.append({
-                    "name": repo.get("name"),
-                    "full_name": repo.get("full_name"),
-                    "url": repo.get("links", {}).get("self", {}).get("href"),
-                    "language": repo.get("language"),
-                    "description": repo.get("description"),
-                    "updated_on": repo.get("updated_on")
-                })
+                repos = []
+                for repo in values:
+                    if repo.get("is_private") and not repo.get("has_access", True):
+                        continue
+                    repos.append({
+                        "name": repo.get("name"),
+                        "full_name": repo.get("full_name"),
+                        "url": repo.get("links", {}).get("self", {}).get("href"),
+                        "language": repo.get("language"),
+                        "description": repo.get("description"),
+                        "updated_on": repo.get("updated_on")
+                    })
 
-            all_repos.extend(repos)
+                all_repos.extend(repos)
 
-            # Handle pagination
-            next_page = response.get("next")
-            if not next_page:
-                break
+                # Handle pagination
+                next_page = response.get("next")
+                if not next_page:
+                    break
 
-            # For next page, we use the full URL
-            params = None
-            endpoint = next_page
+                # For next page, we use the full URL
+                params = None
+                endpoint = next_page
 
         return all_repos
 
@@ -164,7 +181,7 @@ class BitbucketClient(CodingClient):
         # Bitbucket uses repo_slug (URL-friendly version of the name)
         url = f"/repositories/{org_name}/{repo_slug}"
 
-        response = self._make_request(url)
+        response = self._make_request(org_name, url)
         return {
             "name": response.get("name"),
             "full_name": response.get("full_name"),
@@ -197,7 +214,7 @@ class BitbucketClient(CodingClient):
         # Set pagination
         params = {"pagelen": min(limit, 100)}  # Limit to requested number or max allowed
 
-        response = self._make_request(url, params=params)
+        response = self._make_request(org_name, url, params=params)
         commits = []
 
         for commit in response.get("values", []):
@@ -247,7 +264,7 @@ class BitbucketClient(CodingClient):
         while endpoint:
             try:
                 self.logger.debug(f"Fetching commits from endpoint: {endpoint}")
-                response = self._make_request(endpoint, params=params)
+                response = self._make_request(org_name, endpoint, params=params)
                 commits_data = response.get("values", [])
                 if not commits_data:
                     self.logger.info("No more commits found.")
@@ -301,7 +318,8 @@ class BitbucketClient(CodingClient):
             repo_slug = repo_name
 
         # Construct the HTTPS clone URL with credentials
-        url = f"https://x-token-auth:{self.config.access_token}@bitbucket.org/{org_name}/{repo_slug}.git"
+        token = self.token_map[org_name]
+        url = f"https://x-token-auth:{token}@bitbucket.org/{org_name}/{repo_slug}.git"
         local_path = os.path.join(self.config.work_dir, repo_slug)
 
         if os.path.exists(local_path):
@@ -415,7 +433,7 @@ class BitbucketClient(CodingClient):
 
         # Make POST request to create the PR using repo-specific headers
         try:
-            result = self._make_request(url, data=data, method="POST")
+            result = self._make_request(org_name, url, data=data, method="POST")
 
             return {
                 "id": result.get("id"),
@@ -466,7 +484,8 @@ class BitbucketClient(CodingClient):
             subprocess.run(["git", "commit", "-m", commit_message], check=True)
 
             # 4. Push to the new branch
-            push_url = f"https://x-token-auth:{self.config.access_token}@bitbucket.org/{org_name}/{repo_slug}.git"
+            token = self.token_map[org_name]
+            push_url = f"https://x-token-auth:{token}@bitbucket.org/{org_name}/{repo_slug}.git"
             subprocess.run(["git", "push", push_url, new_branch_name], check=True)
             self.logger.info(f"Successfully created branch '{new_branch_name}' pushed to Bitbucket.")
 
@@ -521,7 +540,7 @@ class BitbucketClient(CodingClient):
 # def main():
 #     # Configure the agent
 #     github_config = BitbucketConfig(
-#         access_token=os.getenv("BITBUCKET_TOKEN")
+#         access_tokens={"horus-ai-labs": os.getenv("BITBUCKET_TOKEN")}
 #     )
 #
 #     # Create and run the agent
@@ -535,7 +554,7 @@ class BitbucketClient(CodingClient):
 #     # print("=====================================================================")
 #     # print(f'Recent commits: {client.execute_action("get_recent_commits", {"repo_name": "horus-ai-labs/DistillFlow"})}')
 #     print("=====================================================================")
-#     print(f'Search code: {client.execute_action("search_code_across_org", {"org_name": "horus-ai-labs", "query": "load_tokenizer"})}')
+#     # print(f'Search code: {client.execute_action("search_code_across_org", {"org_name": "horus-ai-labs", "query": "load_tokenizer"})}')
 #     print("=====================================================================")
 #     # print(f'ls: {client.execute_action("list_files", {"repo_name": "horus-ai-labs/DistillFlow"})}')
 #     # print("=====================================================================")
