@@ -1,4 +1,3 @@
-import os
 import re
 import urllib
 from functools import lru_cache
@@ -6,6 +5,8 @@ from functools import lru_cache
 import requests
 from typing import List, Dict, Optional, Union, Any
 from datetime import datetime, timedelta
+
+from . import util
 from .action_router import ActionRouter, action
 import logging
 
@@ -90,7 +91,7 @@ class KibanaClient(ActionRouter):
         (looking forward from start_time or backward from end_time).
         """
         # Convert to datetime objects if they're strings
-        time_range = self._convert_to_iso_range(start_time, end_time)
+        time_range = util.convert_to_iso_range(start_time, end_time)
         # Build the query
         must_conditions = [
             {
@@ -168,7 +169,7 @@ class KibanaClient(ActionRouter):
         kql_query = self._extract_kql_query(kql_query)
 
         must_conditions = [{"query_string": {"query": kql_query, "analyze_wildcard": True}}]
-        time_range = self._convert_to_iso_range(start_time, end_time)
+        time_range = util.convert_to_iso_range(start_time, end_time)
         # Add time range if provided
         if time_range:
             must_conditions.append({"range": {"@timestamp": time_range}})
@@ -236,7 +237,7 @@ class KibanaClient(ActionRouter):
     ) -> int:
         """Get count of logs matching KQL within time range"""
         # Base time range filter
-        time_range = self._convert_to_iso_range(start_time, end_time)
+        time_range = util.convert_to_iso_range(start_time, end_time)
         must_conditions = []
         if start_time or end_time:
             must_conditions.append({
@@ -286,51 +287,6 @@ class KibanaClient(ActionRouter):
             # Return the input as is, assuming it's a direct KQL query
             return input_text.strip()
 
-    def _convert_to_iso_range(self, start_time: Optional[Union[str, datetime]], end_time: Optional[Union[str, datetime]]) -> dict:
-        if not start_time and not end_time:
-            return {}
-
-        start_dt, end_dt = None, None
-        if start_time:
-            if isinstance(start_time, str):
-                start_dt = datetime.fromisoformat(start_time)
-            else:
-                start_dt = start_time
-
-        if end_time:
-            if isinstance(end_time, str):
-                end_dt = datetime.fromisoformat(end_time)
-            else:
-                end_dt = end_time
-
-        # Calculate time difference
-        if start_dt and end_dt:
-            time_diff = end_dt - start_dt
-            max_window = timedelta(days=1)
-
-            # Adjust time window if it exceeds 1 day
-            if time_diff > max_window:
-                self.logger.warning(
-                    f"Time window of {time_diff} exceeds maximum allowed {max_window}. "
-                    f"Adjusting to 1 day window ending at {end_dt.isoformat()}"
-                )
-                start_dt = end_dt - max_window
-
-        # Convert back to ISO format strings for the query
-        if not start_dt:
-            return {
-                "lte": end_dt.isoformat()
-            }
-
-        if not end_dt:
-            return {
-                "gte": start_dt.isoformat(),
-            }
-        return {
-            "gte": start_dt.isoformat(),
-            "lte": end_dt.isoformat()
-        }
-
     @action(description="Fetch all available queryable fields for the given index pattern")
     @lru_cache
     def get_available_fields(self, index_pattern: str) -> set:
@@ -363,7 +319,7 @@ class KibanaClient(ActionRouter):
                         "must": [
                             {
                                 "range": {
-                                    "@timestamp": self._convert_to_iso_range(start_time=datetime.utcnow() - timedelta(hours=1), end_time=datetime.utcnow())
+                                    "@timestamp": util.convert_to_iso_range(start_time=datetime.utcnow() - timedelta(hours=1), end_time=datetime.utcnow())
                                 }
                             }
                         ]

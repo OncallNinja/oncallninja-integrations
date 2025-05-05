@@ -2,6 +2,8 @@ import requests
 import urllib.parse
 from typing import Dict, List, Optional, Union, Any
 from datetime import datetime, timedelta
+
+from . import util
 from .action_router import action, ActionRouter
 
 class SentryAPIClient(ActionRouter):
@@ -53,13 +55,12 @@ class SentryAPIClient(ActionRouter):
             )
 
             response.raise_for_status()
+            print(f"Status code: {response.status_code}")
+            print(f"Response: {response.text}")
             return response.json()
         except requests.exceptions.HTTPError as e:
             # Print additional details for debugging
-            print(f"Request failed: {e}")
-            print(f"URL: {response.url}")
-            print(f"Status code: {response.status_code}")
-            print(f"Response: {response.text}")
+            print(f"Request failed for url {url}: {e}")
             raise
 
     # Organization endpoints
@@ -156,8 +157,8 @@ class SentryAPIClient(ActionRouter):
             status: Optional[str] = None,
             environment: Optional[str] = None,
             limit: int = 100,
-            start_date: Optional[datetime] = None,
-            end_date: Optional[datetime] = None,
+            start_date: Optional[str] = None,
+            end_date: Optional[str] = None,
             sort_by: str = "date"
     ) -> List[Dict]:
         """
@@ -177,6 +178,10 @@ class SentryAPIClient(ActionRouter):
             List of issues with timestamps
         """
         params = {"limit": limit}
+
+        time_range = util.convert_to_iso_range(start_date, end_date)
+        start_date = time_range.get('gte')
+        end_date = time_range.get('lte')
 
         # Handle sorting - Sentry API uses "-" prefix for descending
         # if sort_by:
