@@ -99,9 +99,9 @@ class BitbucketClient(CodingClient):
         all_org_names = set()
 
         endpoint = "/repositories?role=member"
-        for org in self.token_map:
+        for org_name in self.token_map:
             while True:
-                response = self._make_request(org, endpoint, params=params)
+                response = self._make_request(org_name, endpoint, params=params)
                 values = response.get("values", [])
 
                 for org in values:
