@@ -1,5 +1,6 @@
 import logging
 import os
+import shutil
 import subprocess
 from datetime import datetime, timezone # Added for timestamp comparison
 
@@ -324,8 +325,40 @@ class BitbucketClient(CodingClient):
         if os.path.exists(local_path):
             # Pull latest changes if repo already exists
             os.chdir(local_path)
+
             # Set the remote URL with credentials before pulling
             subprocess.run(["git", "remote", "set-url", "origin", url], check=True)
+
+            # Check if we're in detached HEAD state or have local changes
+            head_state = subprocess.run(["git", "symbolic-ref", "--quiet", "HEAD"],
+                                        capture_output=True, text=True)
+
+            # If in detached HEAD state or any other issues, reset to main branch
+            if head_state.returncode != 0:
+                print("Repository is in detached HEAD state, attempting to fix...")
+
+                # Fetch all branches
+                subprocess.run(["git", "fetch", "origin"], check=True)
+
+                # Get default branch from remote
+                default_branch = subprocess.run(
+                    ["git", "remote", "show", "origin"],
+                    capture_output=True, text=True, check=True
+                )
+
+                # Parse the output to find the default branch (usually HEAD branch)
+                for line in default_branch.stdout.splitlines():
+                    if "HEAD branch:" in line:
+                        main_branch = line.split(":")[-1].strip()
+                        break
+                else:
+                    # Default to main if we can't determine
+                    main_branch = "main"
+
+                print(f"Resetting to origin/{main_branch}")
+
+                # Try to checkout the main branch from remote
+                subprocess.run(["git", "checkout", "-B", main_branch, f"origin/{main_branch}"], check=True)
 
             # Check if there are local changes
             result = subprocess.run(["git", "status", "--porcelain"], check=True, capture_output=True, text=True)
@@ -336,6 +369,7 @@ class BitbucketClient(CodingClient):
                 print(f"Local changes detected: {changes.stdout}, removing...")
 
                 subprocess.run(["git", "reset", "--hard", "HEAD"], check=True)
+
             try:
                 # Pull the latest changes
                 subprocess.run(["git", "pull"], check=True)
@@ -343,7 +377,39 @@ class BitbucketClient(CodingClient):
 
             except subprocess.CalledProcessError as e:
                 print(f"Error pulling changes: {e}")
-                # Handle the error (retry, notify user, etc.)
+                # If pull still fails, try more aggressive approach
+                try:
+                    print("Attempting more aggressive reset...")
+                    # Fetch all
+                    subprocess.run(["git", "fetch", "--all"], check=True)
+                    # Hard reset to remote
+                    current_branch = subprocess.run(
+                        ["git", "branch", "--show-current"],
+                        capture_output=True, text=True, check=True
+                    ).stdout.strip()
+
+                    if not current_branch:
+                        # If still no current branch, determine default branch
+                        for line in subprocess.run(
+                                ["git", "remote", "show", "origin"],
+                                capture_output=True, text=True, check=True
+                        ).stdout.splitlines():
+                            if "HEAD branch:" in line:
+                                current_branch = line.split(":")[-1].strip()
+                                break
+                        else:
+                            current_branch = "main"  # Default to main
+
+                    # Reset to remote branch
+                    subprocess.run(["git", "reset", "--hard", f"origin/{current_branch}"], check=True)
+                    print(f"Reset to origin/{current_branch}")
+                except subprocess.CalledProcessError as reset_error:
+                    print(f"Fatal error, could not reset: {reset_error}")
+                    # Last resort: delete and re-clone
+                    print("Deleting and re-cloning repository...")
+                    os.chdir(self.config.work_dir)
+                    shutil.rmtree(local_path, ignore_errors=True)
+                    subprocess.run(["git", "clone", url, local_path], check=True)
         else:
             # Clone with credentials in URL
             subprocess.run(["git", "clone", url, local_path], check=True)
@@ -372,11 +438,12 @@ class BitbucketClient(CodingClient):
                     # Decide if we should raise an error or just log and return the path
                     # For now, log the error and continue, returning the path to the repo head
                 except Exception as e:
-                     print(f"An unexpected error occurred during checkout: {e}")
+                    print(f"An unexpected error occurred during checkout: {e}")
             else:
-                log.warning(f"Could not find a commit before {self.issue_timestamp}. Repository remains at the latest commit.")
+                log.warning(
+                    f"Could not find a commit before {self.issue_timestamp}. Repository remains at the latest commit.")
         else:
-             print("No issue timestamp provided, repository remains at the latest commit.")
+            print("No issue timestamp provided, repository remains at the latest commit.")
         # --- End Checkout ---
 
         return local_path
