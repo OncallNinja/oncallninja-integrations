@@ -84,9 +84,9 @@ class BitbucketClient(CodingClient):
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            log.error(f"Error making request to Bitbucket API: {e}")
+            print(f"Error making request to Bitbucket API: {e}")
             if hasattr(e, 'response') and hasattr(e.response, 'text'):
-                log.error(f"Response content: {e.response.text}")
+                print(f"Response content: {e.response.text}")
             raise
 
     @action(description="Lists all accessible org_names")
@@ -242,7 +242,7 @@ class BitbucketClient(CodingClient):
         Returns:
             The commit hash as a string, or None if no commit is found before the timestamp.
         """
-        log.info(f"Searching for commit before '{timestamp_str}' in {org_name}/{repo_slug}")
+        print(f"Searching for commit before '{timestamp_str}' in {org_name}/{repo_slug}")
 
         try:
             # Parse the input timestamp string (assuming naive local time) and make it UTC
@@ -254,7 +254,7 @@ class BitbucketClient(CodingClient):
             log.debug(f"Target timestamp parsed to UTC: {target_dt_utc.isoformat()}")
 
         except ValueError as e:
-            log.error(f"Error parsing input timestamp '{timestamp_str}': {e}")
+            print(f"Error parsing input timestamp '{timestamp_str}': {e}")
             return None
 
         endpoint = f"/repositories/{org_name}/{repo_slug}/commits"
@@ -266,7 +266,7 @@ class BitbucketClient(CodingClient):
                 response = self._make_request(org_name, endpoint, params=params)
                 commits_data = response.get("values", [])
                 if not commits_data:
-                    log.info("No more commits found.")
+                    print("No more commits found.")
                     break # No commits on this page
 
                 for commit in commits_data:
@@ -283,10 +283,10 @@ class BitbucketClient(CodingClient):
 
                         # Compare timezone-aware datetimes
                         if commit_dt < target_dt_utc:
-                            log.info(f"Found commit {commit_hash} before target timestamp.")
+                            print(f"Found commit {commit_hash} before target timestamp.")
                             return commit_hash
                     except ValueError as e:
-                        log.error(f"Error parsing commit date '{commit_date_str}' for commit {commit_hash}: {e}")
+                        print(f"Error parsing commit date '{commit_date_str}' for commit {commit_hash}: {e}")
                         continue # Skip commit if date parsing fails
 
                 # Prepare for next page
@@ -295,13 +295,13 @@ class BitbucketClient(CodingClient):
                 log.debug(f"Moving to next page: {endpoint}")
 
             except requests.exceptions.RequestException as e:
-                log.error(f"API error fetching commits: {e}")
+                print(f"API error fetching commits: {e}")
                 return None # Stop searching on API error
             except Exception as e:
-                log.error(f"Unexpected error processing commits: {e}")
+                print(f"Unexpected error processing commits: {e}")
                 return None # Stop on unexpected errors
 
-        log.info(f"No commit found strictly before {timestamp_str} in {org_name}/{repo_slug}")
+        print(f"No commit found strictly before {timestamp_str} in {org_name}/{repo_slug}")
         return None
 
     @action(description="clone the repository locally")
@@ -333,16 +333,16 @@ class BitbucketClient(CodingClient):
             if result.stdout.strip():
                 # Log the changes
                 changes = subprocess.run(["git", "status"], check=True, capture_output=True, text=True)
-                log.info(f"Local changes detected: {changes.stdout}, removing...")
+                print(f"Local changes detected: {changes.stdout}, removing...")
 
                 subprocess.run(["git", "reset", "--hard", "HEAD"], check=True)
             try:
                 # Pull the latest changes
                 subprocess.run(["git", "pull"], check=True)
-                log.info("Successfully pulled latest changes")
+                print("Successfully pulled latest changes")
 
             except subprocess.CalledProcessError as e:
-                log.info(f"Error pulling changes: {e}")
+                print(f"Error pulling changes: {e}")
                 # Handle the error (retry, notify user, etc.)
         else:
             # Clone with credentials in URL
@@ -356,27 +356,27 @@ class BitbucketClient(CodingClient):
 
         # --- Checkout specific commit based on timestamp ---
         if self.issue_timestamp:
-            log.info(f"Issue timestamp provided ({self.issue_timestamp}), attempting to find commit before this time.")
+            print(f"Issue timestamp provided ({self.issue_timestamp}), attempting to find commit before this time.")
             commit_hash_to_checkout = self.get_commit_before_timestamp(org_name, repo_slug, self.issue_timestamp)
 
             if commit_hash_to_checkout:
-                log.info(f"Checking out commit: {commit_hash_to_checkout}")
+                print(f"Checking out commit: {commit_hash_to_checkout}")
                 try:
                     # Ensure we are in the correct directory before checkout
                     os.chdir(local_path)
                     subprocess.run(["git", "checkout", commit_hash_to_checkout], check=True, capture_output=True)
-                    log.info(f"Successfully checked out commit {commit_hash_to_checkout}")
+                    print(f"Successfully checked out commit {commit_hash_to_checkout}")
                 except subprocess.CalledProcessError as e:
-                    log.error(f"Failed to checkout commit {commit_hash_to_checkout}: {e}")
-                    log.error(f"Git stderr: {e.stderr.decode()}")
+                    print(f"Failed to checkout commit {commit_hash_to_checkout}: {e}")
+                    print(f"Git stderr: {e.stderr.decode()}")
                     # Decide if we should raise an error or just log and return the path
                     # For now, log the error and continue, returning the path to the repo head
                 except Exception as e:
-                     log.error(f"An unexpected error occurred during checkout: {e}")
+                     print(f"An unexpected error occurred during checkout: {e}")
             else:
                 log.warning(f"Could not find a commit before {self.issue_timestamp}. Repository remains at the latest commit.")
         else:
-             log.info("No issue timestamp provided, repository remains at the latest commit.")
+             print("No issue timestamp provided, repository remains at the latest commit.")
         # --- End Checkout ---
 
         return local_path
@@ -447,9 +447,9 @@ class BitbucketClient(CodingClient):
                 "url": result.get("links", {}).get("html", {}).get("href")
             }
         except requests.exceptions.RequestException as e:
-            log.error(f"Error creating pull request: {e}")
+            print(f"Error creating pull request: {e}")
             if hasattr(e, 'response') and hasattr(e.response, 'text'):
-                log.error(f"Response content: {e.response.text}")
+                print(f"Response content: {e.response.text}")
             raise
 
     @action(description="Commits all local changes and pushes to a new Bitbucket branch")
@@ -486,13 +486,13 @@ class BitbucketClient(CodingClient):
             token = self.token_map[org_name]
             push_url = f"https://x-token-auth:{token}@bitbucket.org/{org_name}/{repo_slug}.git"
             subprocess.run(["git", "push", push_url, new_branch_name], check=True)
-            log.info(f"Successfully created branch '{new_branch_name}' pushed to Bitbucket.")
+            print(f"Successfully created branch '{new_branch_name}' pushed to Bitbucket.")
 
         except subprocess.CalledProcessError as e:
-            log.error(f"Error during commit and push: {e}")
+            print(f"Error during commit and push: {e}")
             raise
         except Exception as e:
-            log.error(f"An unexpected error occurred: {e}")
+            print(f"An unexpected error occurred: {e}")
             raise
 
     # @action(description="Searches for code in the org_name or repository")
@@ -532,7 +532,7 @@ class BitbucketClient(CodingClient):
     #
     #         return search_results
     #     except Exception as e:
-    #         log.error(f"Error searching code in Bitbucket: {e}")
+    #         print(f"Error searching code in Bitbucket: {e}")
     #         return []
 
 # # Command Line Interface
