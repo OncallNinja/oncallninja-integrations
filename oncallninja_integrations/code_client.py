@@ -15,6 +15,7 @@ class CodingClient(ActionRouter):
         self.work_dir = Path(work_dir)
         os.makedirs(work_dir, exist_ok=True)
 
+    @action(description="clone the repository locally")
     def clone_repository(self, workspace: Optional[str], repo_name: str) -> str:
         raise NotImplementedError("Coding clients must implement the convert method.")
 
