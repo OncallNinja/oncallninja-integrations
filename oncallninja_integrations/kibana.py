@@ -1,3 +1,4 @@
+import os
 import re
 import urllib
 from functools import lru_cache
@@ -391,6 +392,8 @@ class KibanaClient(ActionRouter):
     #                                 "service_impact": {"terms": {"field": "service.name", "size": 3}}
     #                             }}))
 
+    # print(client.execute_action("validate_query", {"kql": 'model_id:"428b544f-018e-4098-bc4d-2218e8241e04" AND message:"*500*"'}))
+    # print(client.execute_action("get_index_patterns", {}))
     # print(client.execute_action("get_log_count", {"index_pattern": "api-logs*", "query": 'model_id:"c8f3e035-73b4-4393-b8fc-16c8c19f96d1" AND level:error'}))
     # print(client.execute_action("get_available_fields", {"index_pattern": "api-logs*"}))
     # print(client.execute_action("get_available_fields_from_sample", {"index_pattern": "api-logs*"}))
