@@ -206,6 +206,9 @@ class BitbucketClient(CodingClient):
                 raise ValueError("Workspace must be provided if repo_name doesn't include it")
             repo_slug = repo_name
 
+        if not limit:
+            limit = 10
+
         if isinstance(limit, str):
             limit = int(limit)
 
