@@ -144,6 +144,40 @@ class SlackClient(ActionRouter):
                 messages.append(message)
         return messages
 
+    @action(description="Fetch a single conversation thread using the channel ID and thread TS")
+    def fetch_conversation(self, channel_id: str, thread_ts: str):
+        try:
+            # First, get the parent message
+            result = self.slack_client.conversations_history(
+                channel=channel_id,
+                oldest=thread_ts,
+                latest=thread_ts,
+                inclusive=True,
+                limit=1
+            )
+
+            if not result['messages']:
+                return {"error": "Message not found"}
+
+            parent_message = self._redact(result['messages'][0])
+
+            # Then get thread replies if it's a thread
+            thread_replies = []
+            if parent_message.get('thread_ts') or parent_message.get('reply_count', 0) > 0:
+                thread_replies = self.get_thread_replies(channel_id, thread_ts)
+                thread_replies = [self._redact(reply) for reply in thread_replies]
+
+            return {
+                "parent_message": parent_message,
+                "thread_replies": thread_replies,
+                "channel_id": channel_id,
+                "thread_ts": thread_ts
+            }
+
+        except SlackApiError as e:
+            self.logger.error(f"Error fetching conversation: {e}")
+            return {"error": str(e)}
+
     @action(description="Fetch a single conversation thread using a Slack URL")
     def fetch_conversation_from_url(self, slack_url):
         """
@@ -177,37 +211,7 @@ class SlackClient(ActionRouter):
                 raise ValueError(f"Could not parse channel ID or timestamp from URL: {slack_url}")
 
             self.logger.info(f"Parsed URL: channel_id={channel_id}, timestamp={timestamp}")
-
-            # First, get the parent message
-            result = self.slack_client.conversations_history(
-                channel=channel_id,
-                oldest=timestamp,
-                latest=timestamp,
-                inclusive=True,
-                limit=1
-            )
-
-            if not result['messages']:
-                return {"error": "Message not found"}
-
-            parent_message = self._redact(result['messages'][0])
-
-            # Then get thread replies if it's a thread
-            thread_replies = []
-            if parent_message.get('thread_ts') or parent_message.get('reply_count', 0) > 0:
-                thread_replies = self.get_thread_replies(channel_id, timestamp)
-                thread_replies = [self._redact(reply) for reply in thread_replies]
-
-            return {
-                "parent_message": parent_message,
-                "thread_replies": thread_replies,
-                "channel_id": channel_id,
-                "timestamp": timestamp
-            }
-
-        except SlackApiError as e:
-            self.logger.error(f"Error fetching conversation: {e}")
-            return {"error": str(e)}
+            return self.fetch_conversation(channel_id, timestamp)
         except ValueError as e:
             self.logger.error(f"URL parsing error: {e}")
             return {"error": str(e)}
