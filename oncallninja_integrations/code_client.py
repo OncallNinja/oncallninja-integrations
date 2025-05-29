@@ -121,15 +121,19 @@ class CodingClient(ActionRouter):
     @action(description="Gets diff for a commit in git diff format")
     def get_commit_diff(self, org_name: Optional[str], repo_name: str, commit_hash: str) -> str:
         """Get diff for a specific commit."""
-        repo_path = self.clone_repository(org_name, repo_name)
-        os.chdir(repo_path)
-        result = subprocess.run(
-            ["git", "show", commit_hash],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        return result.stdout
+        try:
+            repo_path = self.clone_repository(org_name, repo_name)
+            os.chdir(repo_path)
+            result = subprocess.run(
+                ["git", "show", commit_hash],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            return result.stdout
+        except Exception as e:
+            self.logger.error(f"Error while running get_commit_diff {e}")
+            raise e
 
     @action(description="Searches for code in the given workspace and repository from the local")
     def search_code(self, workspace: str, repo_name: str, query: str) -> List[Dict[str, Any]]:

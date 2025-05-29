@@ -191,31 +191,49 @@ class BitbucketClient(CodingClient):
             "url": response.get("links", {}).get("self", {}).get("href"),
             "description": response.get("description"),
             "updated_on": response.get("updated_on"),
-            "created_on": response.get("created_on")
+            "created_on": response.get("created_on"),
+            "main_branch": response.get("mainbranch", {}).get("name") # Added main_branch
         }
 
-    @action(description="Gets recent commits made to the repository, default limit: 10")
+    @action(description="Gets recent commits made to the repository, always limited to the main branch, default limit: 10")
     def get_recent_commits(self, org_name: Optional[str], repo_name: str, limit: Optional[int] = 10) -> List[Dict[str, Any]]:
-        """Get recent commits for a repository."""
+        """Get recent commits for a repository's main branch."""
         if "/" in repo_name:
-            # If full path is provided (org_name/repo)
             org_name, repo_slug = repo_name.split("/")
         else:
-            # Use provided org_name and repo name
             if not org_name:
                 raise ValueError("Workspace must be provided if repo_name doesn't include it")
             repo_slug = repo_name
 
         if not limit:
             limit = 10
-
         if isinstance(limit, str):
             limit = int(limit)
 
-        url = f"/repositories/{org_name}/{repo_slug}/commits"
+        # Get repository details to find the main branch
+        repo_details = self.get_repository(org_name, repo_slug)
+        main_branch = repo_details.get("main_branch")
 
-        # Set pagination
-        params = {"pagelen": min(limit, 100)}  # Limit to requested number or max allowed
+        if not main_branch:
+            log.warning(f"Could not determine main branch for {org_name}/{repo_slug}. Falling back to 'master' or 'main'.")
+            # Attempt common default branch names if not found
+            # This is a fallback and might not always be accurate
+            try:
+                # Try to fetch commits for 'main' branch
+                self._make_request(org_name, f"/repositories/{org_name}/{repo_slug}/commits/main", params={"pagelen": 1})
+                main_branch = "main"
+            except requests.exceptions.RequestException:
+                try:
+                    # If 'main' fails, try 'master'
+                    self._make_request(org_name, f"/repositories/{org_name}/{repo_slug}/commits/master", params={"pagelen": 1})
+                    main_branch = "master"
+                except requests.exceptions.RequestException:
+                    raise ValueError(f"Could not determine a valid main branch for {org_name}/{repo_slug}. Please specify a branch if this is not 'main' or 'master'.")
+
+
+        url = f"/repositories/{org_name}/{repo_slug}/commits/{main_branch}"
+
+        params = {"pagelen": min(limit, 100)}
 
         response = self._make_request(org_name, url, params=params)
         commits = []
@@ -615,31 +633,31 @@ class BitbucketClient(CodingClient):
     #         print(f"Error searching code in Bitbucket: {e}")
     #         return []
 
-# # Command Line Interface
+# Command Line Interface
 # def main():
 #     # Configure the agent
 #     github_config = BitbucketConfig(
-#         access_tokens={"horus-ai-labs": os.getenv("BITBUCKET_TOKEN")}
+#         access_tokens={"nanonets": os.getenv("BITBUCKET_TOKEN")}
 #     )
-#
-#     # Create and run the agent
-#     client = BitbucketClient(github_config)
-#     print("=====================================================================")
-#     print(f'List repos: {client.execute_action("list_repositories", {"org_name": "horus-ai-labs"})}')
-#     # print("=====================================================================")
-#     print(f'Get repos: {client.execute_action("get_repository", {"org_name": "horus-ai-labs", "repo_name": "DistillFlow"})}')
-#     # print("=====================================================================")
-#     print(f'List files: {client.execute_action("list_files", {"org_name": "horus-ai-labs", "repo_name": "DistillFlow"})}')
-#     # print("=====================================================================")
-#     # print(f'Recent commits: {client.execute_action("get_recent_commits", {"repo_name": "horus-ai-labs/DistillFlow"})}')
-#     print("=====================================================================")
-#     # print(f'Search code: {client.execute_action("search_code_across_org", {"org_name": "horus-ai-labs", "query": "load_tokenizer"})}')
-#     print("=====================================================================")
-#     # print(f'ls: {client.execute_action("list_files", {"repo_name": "horus-ai-labs/DistillFlow"})}')
-#     # print("=====================================================================")
-#     # print(f'Read file: {client.execute_action("read_file", {"repo_name": "horus-ai-labs/DistillFlow", "file_path": "README.rst"})}')
-#     # print("=====================================================================")
-#     # print(f'Read file: {client.execute_action("get_commit_diff", {"repo_name": "horus-ai-labs/DistillFlow", "commit_hash": "368a10b5463ebf6feda0c329a7edc6ba73242ddc"})}')
+
+    # # Create and run the agent
+    # client = BitbucketClient(github_config)
+    # print("=====================================================================")
+    # print(f'List repos: {client.execute_action("list_repositories", {"org_name": "horus-ai-labs"})}')
+    # # print("=====================================================================")
+    # print(f'Get repos: {client.execute_action("get_repository", {"org_name": "horus-ai-labs", "repo_name": "DistillFlow"})}')
+    # # print("=====================================================================")
+    # print(f'List files: {client.execute_action("list_files", {"org_name": "horus-ai-labs", "repo_name": "DistillFlow"})}')
+    # print("=====================================================================")
+    # print(f'Recent commits: {client.execute_action("get_recent_commits", {"repo_name": "nanonets/nanonets_react_app"})}')
+    # print("=====================================================================")
+    # print(f'Search code: {client.execute_action("search_code_across_org", {"org_name": "horus-ai-labs", "query": "load_tokenizer"})}')
+    # print("=====================================================================")
+    # print(f'ls: {client.execute_action("list_files", {"repo_name": "horus-ai-labs/DistillFlow"})}')
+    # print("=====================================================================")
+    # print(f'Read file: {client.execute_action("read_file", {"repo_name": "horus-ai-labs/DistillFlow", "file_path": "README.rst"})}')
+    # print("=====================================================================")
+#     print(f'Read file: {client.execute_action("get_commit_diff", {"repo_name": "nanonets/nanonets_react_app", "commit_hash": "76a6d2b2820e0c0dffee8132cdff4d8e21a5b2f2"})}')
 #
 # if __name__ == "__main__":
 #     main()
