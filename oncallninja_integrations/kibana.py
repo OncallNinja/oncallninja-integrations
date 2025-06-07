@@ -7,12 +7,19 @@ import requests
 from typing import List, Dict, Optional, Union, Any
 from datetime import datetime, timedelta
 
+from pydantic import BaseModel
+
 from . import util
 from .action_router import ActionRouter, action
 import logging
 
+class KibanaConfig(BaseModel):
+    base_url: str
+    username: str
+    password: str
+
 class KibanaClient(ActionRouter):
-    def __init__(self, base_url: str, username: str, password: str, max_allowed_hits = 1000):
+    def __init__(self, kibana_regional_config: Dict[str, KibanaConfig], max_allowed_hits = 1000):
         """
         Initialize the Kibana client with authentication credentials.
         
@@ -21,15 +28,8 @@ class KibanaClient(ActionRouter):
             username: Kibana username
             password: Kibana password
         """
-        self.base_url = base_url.rstrip('/')
         self.max_allowed_hits = max_allowed_hits
-        self.auth = (username, password)
-        self.session = requests.Session()
-        self.session.auth = self.auth
-        self.session.headers.update({
-            'kbn-xsrf': 'true',
-            'Content-Type': 'application/json'
-        })
+        self.config = kibana_regional_config
         self.logger = logging.getLogger(__name__)
 
         super().__init__()
@@ -37,12 +37,29 @@ class KibanaClient(ActionRouter):
     
     @action(description="KIBANA API: Make HTTP request.")
     def _make_request(self, method: str, path: str, params: Optional[Dict] = None, 
-                     data: Optional[Dict] = None) -> Dict:
+                     data: Optional[Dict] = None, region: str = "US") -> Dict:
         """
         Internal method to make authenticated requests to Kibana API.
         """
+        kibana_config = None
+        if region in self.config:
+            kibana_config = self.config[region]
+            self.logger.info(f"Using Kibana regional config for: {region}")
+        elif "US" in self.config:  # Fallback to US regional if requested region not found
+            kibana_config = self.config["US"]
+            self.logger.info(
+                f"Kibana region '{region}' not found in regional_configs, falling back to US regional config.")
+
+
         self.logger.info("Making HTTP request")
-        url = f"{self.base_url}{path}"
+        url = f"{kibana_config.base_url.rstrip('/')}{path}"
+        self.auth = (kibana_config.username, kibana_config.password)
+        self.session = requests.Session()
+        self.session.auth = self.auth
+        self.session.headers.update({
+            'kbn-xsrf': 'true',
+            'Content-Type': 'application/json'
+        })
         try:
             response = self.session.request(
                 method,
@@ -58,7 +75,7 @@ class KibanaClient(ActionRouter):
     
     @action(description="KIBANA API: Get index patterns.")
     @lru_cache
-    def get_index_patterns(self) -> List[Dict]:
+    def get_index_patterns(self, region = "US") -> List[Dict]:
         """
         Get all index patterns from Kibana.
         
@@ -70,7 +87,7 @@ class KibanaClient(ActionRouter):
             'type': 'index-pattern',
             'fields': 'title'
         }
-        result = self._make_request('GET', path, params=params)
+        result = self._make_request('GET', path, params=params, region=region)
         return result.get('saved_objects', [])
 
     @action(description="KIBANA API: Get logs. Supply an index pattern, optionally start and end time, optional log_level, optional search query, and size (default set as 100). Maximum time window is 1 day.")
@@ -82,6 +99,7 @@ class KibanaClient(ActionRouter):
         field_filters: Optional[Dict[str, str]],
         log_level: Optional[str] = None,
         search_query: Optional[str] = None,
+        region = "US",
         size: int = 100,
         fields: Optional[List[str]] = None,
         aggregations: Optional[Dict[str, Any]] = None,
@@ -151,7 +169,7 @@ class KibanaClient(ActionRouter):
             query["_source"] = fields
 
         path = f"/api/console/proxy?path={index_pattern}/_count&method=GET"
-        response = self._make_request('POST', path, data=count_query)
+        response = self._make_request('POST', path, data=count_query, region=region)
         log_count = response.get('count', 0)
         if log_count > self.max_allowed_hits and size > self.max_allowed_hits:
             raise Exception(f"Query would return too many logs ({log_count}). Maximum allowed is {self.max_allowed_hits}. Please refine your query.")
@@ -160,10 +178,11 @@ class KibanaClient(ActionRouter):
             raise Exception(f"Query produced 0 logs. Please refine your query.")
 
         path = f"/api/console/proxy?path={index_pattern}/_search&method=GET"
-        return self._make_request('POST', path, data=query)
+        return self._make_request('POST', path, data=query, region=region)
 
     @action(description="Fetch logs using a KQL query")
-    def fetch_logs_by_kql(self, index_pattern, kql_query, start_time: Optional[Union[str, datetime]], end_time: Optional[Union[str, datetime]], aggregations: Dict, size = 100):
+    def fetch_logs_by_kql(self, index_pattern, kql_query, start_time: Optional[Union[str, datetime]],
+                          end_time: Optional[Union[str, datetime]], aggregations: Dict, region="US", size = 100):
         """
         Fetch logs using elasticsearch-py queries.
         """
@@ -194,7 +213,7 @@ class KibanaClient(ActionRouter):
 
         # First check count
         count_path = f"/api/console/proxy?path={encoded_index_pattern}/_count&method=GET"
-        count_result = self._make_request('POST', count_path, data={"query": query["query"]})
+        count_result = self._make_request('POST', count_path, data={"query": query["query"]}, region=region)
         log_count = count_result.get("count", 0)
         if log_count > self.max_allowed_hits and size > self.max_allowed_hits:
             raise Exception(
@@ -204,10 +223,10 @@ class KibanaClient(ActionRouter):
 
         # Now get full results
         path = f"/api/console/proxy?path={encoded_index_pattern}/_search&method=GET"
-        return self._make_request('POST', path, data=query)
+        return self._make_request('POST', path, data=query, region=region)
 
     @action(description="KIBANA API: Validate query. Supply a kql query, and returns if the query is valid, if not, also returns the error")
-    def validate_query(self, kql: str) -> (bool, Optional[dict]):
+    def validate_query(self, kql: str, region="US") -> (bool, Optional[dict]):
         """Validate KQL using Kibana's API"""
         try:
             test_query = {
@@ -222,7 +241,8 @@ class KibanaClient(ActionRouter):
             response = self._make_request(
                 'POST',
                 '/api/console/proxy?path=_validate/query&method=GET',
-                data=test_query
+                data=test_query,
+                region=region
             )
             return response["valid"], response.get("error")
         except Exception as e:
@@ -234,7 +254,8 @@ class KibanaClient(ActionRouter):
             index_pattern: str,
             start_time: Optional[Union[str, datetime]],
             end_time: Optional[Union[str, datetime]],
-            query: Optional[str] = None
+            query: Optional[str] = None,
+            region = "US"
     ) -> int:
         """Get count of logs matching KQL within time range"""
         # Base time range filter
@@ -264,7 +285,7 @@ class KibanaClient(ActionRouter):
         }
 
         path = f"/api/console/proxy?path={index_pattern}/_count&method=GET"
-        response = self._make_request('POST', path, data=count_query)
+        response = self._make_request('POST', path, data=count_query, region=region)
         return response.get('count', 0)
 
     def _extract_kql_query(self, input_text):
@@ -290,7 +311,7 @@ class KibanaClient(ActionRouter):
 
     @action(description="Fetch all available queryable fields for the given index pattern")
     @lru_cache
-    def get_available_fields(self, index_pattern: str) -> set:
+    def get_available_fields(self, index_pattern: str, region = "US") -> set:
         """Get fields using legacy Kibana index patterns API"""
         try:
             response = self._make_request(
@@ -302,7 +323,8 @@ class KibanaClient(ActionRouter):
                     "type": "index_pattern",
                     "rollup_index": "",
                     "allow_no_index": True
-                }
+                },
+                region=region
             )
             return {field['name'] for field in response['fields']}
         except Exception as e:
@@ -310,7 +332,7 @@ class KibanaClient(ActionRouter):
             return set()
 
     @action(description="Fetch fields from a sample log")
-    def get_available_fields_from_sample(self, index_pattern: str, size=1) -> set:
+    def get_available_fields_from_sample(self, index_pattern: str, region="US", size=1) -> set:
         """Get fields by sampling documents from the index"""
         try:
             # Get a sample document
@@ -329,7 +351,7 @@ class KibanaClient(ActionRouter):
                 "size": size
             }
             path = f"/api/console/proxy?path={index_pattern}/_search&method=GET"
-            response = self._make_request('POST', path, data=query)
+            response = self._make_request('POST', path, data=query, region=region)
             # response = self.get_logs(index_pattern, start_time=datetime.utcnow() - timedelta(days=1), end_time=datetime.utcnow(), field_filters=None, size=1)
 
             fields = set()
@@ -345,7 +367,7 @@ class KibanaClient(ActionRouter):
                     # Add source fields recursively
                     if '_source' in hit:
                         fields.add("_source")
-                        source_fields = self._extract_fields_from_doc(hit['_source'])
+                        source_fields = self._extract_fields_from_doc(hit['_source'], region)
                         fields.update(source_fields)
 
             return fields
@@ -353,7 +375,7 @@ class KibanaClient(ActionRouter):
             print(f"Field fetch failed: {str(e)}")
             return set()
 
-    def _extract_fields_from_doc(self, doc, parent_path=""):
+    def _extract_fields_from_doc(self, doc, parent_path="", region="US"):
         """Extract field names recursively from a document"""
         fields = set()
 
@@ -364,33 +386,33 @@ class KibanaClient(ActionRouter):
 
                 # Recurse into nested objects
                 if isinstance(value, (dict, list)):
-                    nested_fields = self._extract_fields_from_doc(value, full_path)
+                    nested_fields = self._extract_fields_from_doc(value, full_path, region)
                     fields.update(nested_fields)
 
         elif isinstance(doc, list) and doc and isinstance(doc[0], dict):
             # For arrays of objects, process the first element
-            nested_fields = self._extract_fields_from_doc(doc[0], parent_path)
+            nested_fields = self._extract_fields_from_doc(doc[0], parent_path, region)
             fields.update(nested_fields)
 
         return fields
 
-# # Example usage
-# if __name__ == "__main__":
-#     # Initialize client
-#     client = KibanaClient(
-#         base_url=os.getenv("KIBANA_BASE_URL"),
-#         username=os.getenv("KIBANA_USERNAME"),
-#         password=os.getenv("KIBANA_PASSWORD")
-#     )
+# Example usage
+if __name__ == "__main__":
+    # Initialize client
+    client = KibanaClient(
+        {"EU":KibanaConfig(base_url=os.getenv("KIBANA_BASE_URL"),
+        username=os.getenv("KIBANA_USERNAME"),
+        password=os.getenv("KIBANA_PASSWORD"))}
+    )
 
-    # print(client.execute_action("fetch_logs_by_kql",
-    #                             {"index_pattern": "api-logs*", "kql_query": 'level:error AND (msg:"Can\'t import files since model has been deleted" OR msg:"Hello!") AND nanonets_api_server',
-    #                              "start_time": datetime(2025, 4, 26, 13, 27, 30, 828019),
-    #                              "end_time": datetime(2025, 4, 26, 13, 28, 13, 828024),
-    #                              "aggregations": {
-    #                                 "error_types": {"terms": {"field": "error_code", "size": 5}},
-    #                                 "service_impact": {"terms": {"field": "service.name", "size": 3}}
-    #                             }}))
+    print(client.execute_action("fetch_logs_by_kql",
+                                {"index_pattern": "api-logs*", "kql_query": 'level:error AND (msg:"Can\'t import files since model has been deleted" OR msg:"Hello!") AND nanonets_api_server',
+                                 "start_time": datetime(2025, 5, 26, 13, 27, 30, 828019),
+                                 "end_time": datetime(2025, 5, 26, 13, 28, 13, 828024),
+                                 "aggregations": {
+                                    "error_types": {"terms": {"field": "error_code", "size": 5}},
+                                    "service_impact": {"terms": {"field": "service.name", "size": 3}}
+                                },"region": "EU"}))
 
     # print(client.execute_action("validate_query", {"kql": 'model_id:"428b544f-018e-4098-bc4d-2218e8241e04" AND message:"*500*"'}))
     # print(client.execute_action("get_index_patterns", {}))
