@@ -1,9 +1,11 @@
+import logging
 from datetime import datetime, timedelta
 from typing import Optional, Union
 
+logger = logging.getLogger(__name__)
 
 def convert_to_iso_range(start_time: Optional[Union[str, datetime]],
-                          end_time: Optional[Union[str, datetime]], max_window = timedelta(days=1)) -> dict:
+                          end_time: Optional[Union[str, datetime]], max_window = timedelta(days=2)) -> dict:
     if not start_time and not end_time:
         return {}
 
@@ -24,11 +26,11 @@ def convert_to_iso_range(start_time: Optional[Union[str, datetime]],
     if start_dt and end_dt:
         time_diff = end_dt - start_dt
 
-        # Adjust time window if it exceeds 1 day
+        # Adjust time window if it exceeds 3 days
         if max_window and time_diff > max_window:
-            self.logger.warning(
+            logger.warning(
                 f"Time window of {time_diff} exceeds maximum allowed {max_window}. "
-                f"Adjusting to 1 day window starting at {start_dt.isoformat()}"
+                f"Adjusting to 2 days window starting at {start_dt.isoformat()}"
             )
             end_dt = start_dt + max_window
 

@@ -1,4 +1,3 @@
-import os
 import re
 import urllib
 from functools import lru_cache
@@ -22,11 +21,6 @@ class KibanaClient(ActionRouter):
     def __init__(self, kibana_regional_config: Dict[str, KibanaConfig], max_allowed_hits = 1000):
         """
         Initialize the Kibana client with authentication credentials.
-        
-        Args:
-            base_url: Base URL of your Kibana instance (e.g., "https://logs.nanonets.com")
-            username: Kibana username
-            password: Kibana password
         """
         self.max_allowed_hits = max_allowed_hits
         self.config = kibana_regional_config
@@ -49,6 +43,8 @@ class KibanaClient(ActionRouter):
             kibana_config = self.config["US"]
             self.logger.info(
                 f"Kibana region '{region}' not found in regional_configs, falling back to US regional config.")
+        else:
+            raise ValueError(f"No kibana configurations available for region {region}")
 
 
         self.logger.info("Making HTTP request")
@@ -370,7 +366,13 @@ class KibanaClient(ActionRouter):
                         source_fields = self._extract_fields_from_doc(hit['_source'], region)
                         fields.update(source_fields)
 
-            return fields
+            processed_fields = set()
+            for field_name in list(fields):
+                if field_name.startswith(f"{region}."):
+                    processed_fields.add(field_name[len(f"{region}."):])
+                else:
+                    processed_fields.add(field_name)
+            return processed_fields
         except Exception as e:
             print(f"Field fetch failed: {str(e)}")
             return set()
@@ -399,26 +401,44 @@ class KibanaClient(ActionRouter):
 # Example usage
 if __name__ == "__main__":
     # Initialize client
+    import os
     client = KibanaClient(
-        {"EU":KibanaConfig(base_url=os.getenv("KIBANA_BASE_URL"),
-        username=os.getenv("KIBANA_USERNAME"),
-        password=os.getenv("KIBANA_PASSWORD"))}
+        {"EU": KibanaConfig(base_url=os.getenv("KIBANA_BASE_URL"),
+    username = os.getenv("KIBANA_USERNAME"),
+    password = os.getenv("KIBANA_PASSWORD"))}
     )
 
-    print(client.execute_action("fetch_logs_by_kql",
-                                {"index_pattern": "api-logs*", "kql_query": 'level:error AND (msg:"Can\'t import files since model has been deleted" OR msg:"Hello!") AND nanonets_api_server',
-                                 "start_time": datetime(2025, 5, 26, 13, 27, 30, 828019),
-                                 "end_time": datetime(2025, 5, 26, 13, 28, 13, 828024),
-                                 "aggregations": {
-                                    "error_types": {"terms": {"field": "error_code", "size": 5}},
-                                    "service_impact": {"terms": {"field": "service.name", "size": 3}}
-                                },"region": "EU"}))
+    # print(client.execute_action("fetch_logs_by_kql",
+    #                             {"index_pattern": "api-logs*",
+    #                              "kql_query": 'level:error AND (msg:"Can\'t import files since model has been deleted" OR msg:"Hello!") AND nanonets_api_server',
+    #                              "start_time": datetime(2025, 5, 26, 13, 27, 30, 828019),
+    #                              "end_time": datetime(2025, 5, 26, 13, 28, 13, 828024),
+    #                              "aggregations": {
+    #                                  "error_types": {"terms": {"field": "error_code", "size": 5}},
+    #                                  "service_impact": {"terms": {"field": "service.name", "size": 3}}
+    #                              }, "region": "EU"}))
+
+    # print(client.execute_action("fetch_logs_by_kql", {
+    #     "index_pattern": "python-logs*", "kql_query": "IN.model_id:\"6df0b2ce-af7a-41c8-9363-fca72c6b3108\"",
+    #     "start_time": datetime(2025, 6, 6, 00, 00, 00, 828019),
+    #     "end_time": datetime(2025, 6, 7, 23, 00, 00, 828019),
+    #     "region": "IN"
+    # }))
+
+    # print(client.execute_action("fetch_logs_by_kql",
+    #                             {"index_pattern": "api-logs*", "kql_query": 'level:error AND (msg:"Can\'t import files since model has been deleted" OR msg:"Hello!") AND nanonets_api_server',
+    #                              "start_time": datetime(2025, 5, 26, 13, 27, 30, 828019),
+    #                              "end_time": datetime(2025, 5, 26, 13, 28, 13, 828024),
+    #                              "aggregations": {
+    #                                 "error_types": {"terms": {"field": "error_code", "size": 5}},
+    #                                 "service_impact": {"terms": {"field": "service.name", "size": 3}}
+    #                             },"region": "EU"}))
 
     # print(client.execute_action("validate_query", {"kql": 'model_id:"428b544f-018e-4098-bc4d-2218e8241e04" AND message:"*500*"'}))
     # print(client.execute_action("get_index_patterns", {}))
     # print(client.execute_action("get_log_count", {"index_pattern": "api-logs*", "query": 'model_id:"c8f3e035-73b4-4393-b8fc-16c8c19f96d1" AND level:error'}))
-    # print(client.execute_action("get_available_fields", {"index_pattern": "api-logs*"}))
-    # print(client.execute_action("get_available_fields_from_sample", {"index_pattern": "api-logs*"}))
+    # print(client.execute_action("get_available_fields", {"index_pattern": "python-logs*", "region": "IN"}))
+    # print(client.execute_action("get_available_fields_from_sample", {"index_pattern": "python-logs*", "region": "IN"}))
     # logs = client.execute_action(
     #                            "get_logs",
     #                            {"index_pattern": "api-logs*",
