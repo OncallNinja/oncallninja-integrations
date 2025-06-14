@@ -5,7 +5,7 @@ from typing import Optional, Union
 logger = logging.getLogger(__name__)
 
 def convert_to_iso_range(start_time: Optional[Union[str, datetime]],
-                          end_time: Optional[Union[str, datetime]], max_window = timedelta(days=2)) -> dict:
+                          end_time: Optional[Union[str, datetime]], max_window = timedelta(days=3)) -> dict:
     if not start_time and not end_time:
         return {}
 
