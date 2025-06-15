@@ -179,9 +179,9 @@ class SentryAPIClient(ActionRouter):
         """
         params = {"limit": limit}
 
-        time_range = util.convert_to_iso_range(start_date, end_date)
-        start_date = time_range.get('gte')
-        end_date = time_range.get('lte')
+
+        start_date = datetime.fromisoformat(start_date)
+        end_date = datetime.fromisoformat(end_date)
 
         # Handle sorting - Sentry API uses "-" prefix for descending
         # if sort_by:
