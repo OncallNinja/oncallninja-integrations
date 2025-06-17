@@ -76,7 +76,6 @@ class SlackClient(ActionRouter):
                 latest=str(end_time),
                 limit=1000  # Max per request
             )
-            print(f"result: {result}")
 
             for message in result['messages']:
                 yield self._redact(message)
@@ -134,6 +133,28 @@ class SlackClient(ActionRouter):
         # Convert to timestamps
         start_timestamp = start_time.timestamp()
         end_timestamp = end_time.timestamp()
+
+        messages = []
+        # Process each channel
+        for channel_id in channel_ids:
+            self.logger.info(f"Processing channel: {channel_id}")
+
+            for message in self.get_messages_for_channel(channel_id, start_timestamp, end_timestamp):
+                messages.append(message)
+        return messages
+
+    @action(description="Fetch messages from given channel IDs between a given start and end time")
+    def fetch_channel_messages(self, channel_ids, start_time: str, end_time: str):
+        """
+        Process messages across multiple channels
+
+        :param channel_ids: List of channel IDs to process
+        :param lookback_days: Number of days to look back
+        """
+
+        # Convert to timestamps
+        start_timestamp = datetime.fromisoformat(start_time).timestamp()
+        end_timestamp = datetime.fromisoformat(end_time).timestamp()
 
         messages = []
         # Process each channel
