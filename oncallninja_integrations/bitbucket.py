@@ -2,7 +2,7 @@ import logging
 import os
 import shutil
 import subprocess
-from datetime import datetime, timezone # Added for timestamp comparison
+from datetime import datetime, timezone, timedelta
 
 import requests
 from typing import List, Dict, Any, Optional
@@ -195,8 +195,8 @@ class BitbucketClient(CodingClient):
             "main_branch": response.get("mainbranch", {}).get("name") # Added main_branch
         }
 
-    @action(description="Gets recent commits made to the repository, always limited to the main branch, default limit: 10")
-    def get_recent_commits(self, org_name: Optional[str], repo_name: str, limit: Optional[int] = 10) -> List[Dict[str, Any]]:
+    @action(description="Gets recent commits made to the repository's main branch within the last specified number of days.")
+    def get_recent_commits(self, org_name: Optional[str], repo_name: str, days: int = 7) -> List[Dict[str, Any]]:
         """Get recent commits for a repository's main branch."""
         if "/" in repo_name:
             org_name, repo_slug = repo_name.split("/")
@@ -204,11 +204,6 @@ class BitbucketClient(CodingClient):
             if not org_name:
                 raise ValueError("Workspace must be provided if repo_name doesn't include it")
             repo_slug = repo_name
-
-        if not limit:
-            limit = 10
-        if isinstance(limit, str):
-            limit = int(limit)
 
         # Get repository details to find the main branch
         repo_details = self.get_repository(org_name, repo_slug)
@@ -233,24 +228,55 @@ class BitbucketClient(CodingClient):
 
         url = f"/repositories/{org_name}/{repo_slug}/commits/{main_branch}"
 
-        params = {"pagelen": min(limit, 100)}
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+        if self.issue_timestamp:
+            cutoff_date = datetime.strptime(self.issue_timestamp, '%Y-%m-%d %H:%M:%S') - timedelta(days=days)
+        commits_result = []
+        
+        current_page_url = url 
+        page_params = {"pagelen": 50, "sort": "-date"} # Maximize items per page, ensure descending date sort
 
-        response = self._make_request(org_name, url, params=params)
-        commits = []
+        while current_page_url:
+            response_json = self._make_request(org_name, current_page_url, params=page_params)
+            # For subsequent requests, page_params should be None as they are in current_page_url (if it's a 'next' link)
+            page_params = None 
+            
+            stop_fetching = False
+            for commit_item in response_json.get("values", []):
+                commit_date_str = commit_item.get("date")
+                if not commit_date_str:
+                    log.warning(f"Commit {commit_item.get('hash')} has no date, skipping.")
+                    continue
 
-        for commit in response.get("values", []):
-            commits.append({
-                "hash": commit.get("hash"),
-                "author": commit.get("author", {}).get("user", {}).get("display_name"),
-                "message": commit.get("message"),
-                "parents": [parent["hash"] for parent in commit.get("parents", [])],
-                "date": commit.get("date")
-            })
+                try:
+                    # Parse commit date (ISO 8601 format)
+                    commit_dt = datetime.fromisoformat(commit_date_str.replace("Z", "+00:00"))
+                except ValueError:
+                    log.warning(f"Could not parse date string {commit_date_str} for commit {commit_item.get('hash')}, skipping.")
+                    continue
+                
+                if commit_dt >= cutoff_date:
+                    commits_result.append({
+                        "hash": commit_item.get("hash"),
+                        "author": commit_item.get("author", {}).get("user", {}).get("display_name"),
+                        "message": commit_item.get("message"),
+                        "parents": [parent["hash"] for parent in commit_item.get("parents", [])],
+                        "date": commit_item.get("date")
+                    })
+                else:
+                    # This commit is older than the cutoff. Since commits are sorted newest first,
+                    # all further commits on this page and subsequent pages will also be older.
+                    stop_fetching = True
+                    break 
+            
+            if stop_fetching:
+                break # Exit the while loop for pagination
 
-            if len(commits) >= limit:
-                break
+            current_page_url = response_json.get("next") # Get URL for the next page, if any
+            if not current_page_url:
+                break # No more pages
 
-        return commits
+        return commits_result
 
     def get_commit_before_timestamp(self, org_name: str, repo_slug: str, timestamp_str: str) -> Optional[str]:
         """
@@ -649,7 +675,7 @@ class BitbucketClient(CodingClient):
     # # print("=====================================================================")
     # print(f'List files: {client.execute_action("list_files", {"org_name": "horus-ai-labs", "repo_name": "DistillFlow"})}')
     # print("=====================================================================")
-    # print(f'Recent commits: {client.execute_action("get_recent_commits", {"repo_name": "nanonets/nanonets_react_app"})}')
+    # print(f'Recent commits: {client.execute_action("get_recent_commits", {"repo_name": "nanonets/nanonets_react_app", "days": 7})}')
     # print("=====================================================================")
     # print(f'Search code: {client.execute_action("search_code_across_org", {"org_name": "horus-ai-labs", "query": "load_tokenizer"})}')
     # print("=====================================================================")
@@ -657,7 +683,7 @@ class BitbucketClient(CodingClient):
     # print("=====================================================================")
     # print(f'Read file: {client.execute_action("read_file", {"repo_name": "horus-ai-labs/DistillFlow", "file_path": "README.rst"})}')
     # print("=====================================================================")
-#     print(f'Read file: {client.execute_action("get_commit_diff", {"repo_name": "nanonets/nanonets_react_app", "commit_hash": "76a6d2b2820e0c0dffee8132cdff4d8e21a5b2f2"})}')
-#
-# if __name__ == "__main__":
-#     main()
+    # print(f'Read file: {client.execute_action("get_commit_diff", {"repo_name": "nanonets/nanonets_react_app", "commit_hash": "76a6d2b2820e0c0dffee8132cdff4d8e21a5b2f2"})}')
+
+if __name__ == "__main__":
+    main()
