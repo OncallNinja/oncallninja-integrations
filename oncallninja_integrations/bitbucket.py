@@ -576,6 +576,50 @@ class BitbucketClient(CodingClient):
                 print(f"Response content: {e.response.text}")
             raise
 
+    @action(description="Creates a snippet (gist) in Bitbucket.")
+    def create_gist(self, repo_name: str, diff_content: str, description: str) -> str:
+        """
+        Creates a snippet (gist) in Bitbucket.
+
+        Args:
+            repo_name: The name of the repository to associate the snippet with.
+            diff_content: The content of the diff to be included in the snippet.
+            description: A description for the snippet.
+
+        Returns:
+            A dictionary containing the details of the created snippet.
+        """
+        if "/" in repo_name:
+            org_name, repo_slug = repo_name.split("/", 1)
+        else:
+            raise ValueError("repo_name must be in the format 'org_name/repo_slug'")
+
+        # The endpoint for creating a snippet is under the user's workspace.
+        # The org's workspace is on a free plan, so we use the user's personal workspace.
+        endpoint = f"/snippets/{org_name}"
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{repo_slug}_diff_{timestamp}.patch"
+
+        data = {
+            "description": description,
+            "is_private": True,
+            "files": {
+                filename: {
+                    "content": diff_content
+                }
+            }
+        }
+
+        try:
+            result = self._make_request(org_name, endpoint, data=data, method="POST")
+            return result.get("links", {}).get("html", {}).get("href")
+        except requests.exceptions.RequestException as e:
+            log.error(f"Error creating snippet: {e}")
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                log.error(f"Response content: {e.response.text}")
+            raise
+
     @action(description="Commits all local changes and pushes to a new Bitbucket branch")
     def commit_changes(self, org_name: Optional[str], repo_name: str,
                         commit_message: str, new_branch_name: str, base_branch: str = "main") -> None:
@@ -661,14 +705,30 @@ class BitbucketClient(CodingClient):
 
 # Command Line Interface
 # def main():
-#     # Configure the agent
-#     github_config = BitbucketConfig(
-#         access_tokens={"nanonets": os.getenv("BITBUCKET_TOKEN")}
-#     )
+    # Configure the agent
+    # github_config = BitbucketConfig(
+    #     access_tokens={"horus-ai-labs": os.getenv("BITBUCKET_TOKEN")}
+    # )
 
-    # # Create and run the agent
+    # Create and run the agent
     # client = BitbucketClient(github_config)
     # print("=====================================================================")
+    # client.execute_action("get_user_info", {"org_name": "horus-ai-labs"})
+
+#     print(f'Create gist: {client.execute_action("create_gist", {"repo_name": "horus-ai-labs/DistillFlow", "diff_content": """
+# diff --git a/deploy_gcp.py b/deploy_gcp.py
+# index 8fc6bdf..2a8a301 100644
+# --- a/deploy_gcp.py
+# +++ b/deploy_gcp.py
+# @@ -306,7 +306,6 @@ def main():
+#      try:
+#          with open(args.script_path, 'r') as f:
+#              startup_script = f.read()
+# -
+#          print(f"Creating instance {instance_name}...")
+#          create_instance(
+#              project_id=args.project_id,""", "description": "test changes"})}')
+    print("=====================================================================")
     # print(f'List repos: {client.execute_action("list_repositories", {"org_name": "horus-ai-labs"})}')
     # # print("=====================================================================")
     # print(f'Get repos: {client.execute_action("get_repository", {"org_name": "horus-ai-labs", "repo_name": "DistillFlow"})}')
@@ -685,5 +745,5 @@ class BitbucketClient(CodingClient):
     # print("=====================================================================")
     # print(f'Read file: {client.execute_action("get_commit_diff", {"repo_name": "nanonets/nanonets_react_app", "commit_hash": "76a6d2b2820e0c0dffee8132cdff4d8e21a5b2f2"})}')
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()

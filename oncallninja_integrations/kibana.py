@@ -717,15 +717,104 @@ class KibanaClient(ActionRouter):
             self.logger.error(f"Error during fetch_summary for {index_pattern}: {str(e)}")
             return FetchSummaryResponse(field_value_map={}, histogram={})
 
+    @action(description="Generates a Kibana Discover URL for the given query, time range, and index pattern.")
+    def generate_kibana_url(
+        self,
+        kql_query: str,
+        start_time: str,
+        end_time: str,
+        index_pattern: str,
+        region: str = "US"
+    ) -> str:
+        """
+        Generates a Kibana Discover URL for the given query, time range, and index pattern.
+
+        Args:
+            kql_query: The KQL query string.
+            start_time: The start of the time range (datetime object or ISO string).
+            end_time: The end of the time range (datetime object or ISO string).
+            index_pattern: The title of the Kibana index pattern (e.g., "api-logs*").
+            region: The Kibana region.
+
+        Returns:
+            A string representing the Kibana Discover URL.
+
+        Raises:
+            ValueError: If the specified region or index pattern title is not found.
+        """
+        kibana_config = None
+        if region in self.config:
+            kibana_config = self.config[region]
+        elif "US" in self.config:
+            kibana_config = self.config["US"]
+            self.logger.info(
+                f"Kibana region '{region}' not found in regional_configs, falling back to US regional config for URL generation."
+            )
+        else:
+            raise ValueError(f"No Kibana configurations available for region {region} for URL generation.")
+
+        base_url = kibana_config.base_url.rstrip('/')
+
+        dt_start = datetime.fromisoformat(start_time)
+        if dt_start.tzinfo is None or dt_start.tzinfo.utcoffset(dt_start) is None:
+            dt_start_utc = dt_start.replace(tzinfo=timezone.utc)
+        else:
+            dt_start_utc = dt_start.astimezone(timezone.utc)
+        processed_start_time_str = dt_start_utc.isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+        dt_end = datetime.fromisoformat(end_time)
+        if dt_end.tzinfo is None or dt_end.tzinfo.utcoffset(dt_end) is None:
+            dt_end_utc = dt_end.replace(tzinfo=timezone.utc)
+        else:
+            dt_end_utc = dt_end.astimezone(timezone.utc)
+        processed_end_time_str = dt_end_utc.isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+        all_index_patterns = self.get_index_patterns(region=region)
+        index_pattern_id = None
+        # The parameter is 'index_pattern', not 'index_pattern_title' as per the user's latest file version
+        for pattern_obj in all_index_patterns:
+            if pattern_obj.get('attributes', {}).get('title') == index_pattern:
+                index_pattern_id = pattern_obj.get('id')
+                break
+        
+        if not index_pattern_id:
+            raise ValueError(f"Index pattern title '{index_pattern}' not found in region '{region}'.")
+
+        # RISON uses single quotes for strings.
+        # A single quote ' within a RISON string must be escaped as '!!'.
+        # Also, an exclamation mark '!' must be escaped as '!()'.
+        # Order of replacement matters: escape '!' first, then "'".
+        escaped_kql_query = kql_query.replace("!", "!()").replace("'", "!!")
+
+        g_state = f"(filters:!(),refreshInterval:(pause:!t,value:0),time:(from:'{processed_start_time_str}',to:'{processed_end_time_str}'))"
+        
+        a_state = (
+            f"(columns:!()," 
+            f"filters:!()," 
+            f"index:'{index_pattern_id}',"
+            f"interval:auto,"
+            f"query:(language:kuery,query:'{escaped_kql_query}')," 
+            f"sort:!(!('@timestamp',desc)))"
+        )
+        
+        kibana_url = f"{base_url}/app/discover#/?_g={urllib.parse.quote(g_state)}&_a={urllib.parse.quote(a_state)}"
+        
+        return kibana_url
+
 # if __name__ == "__main__":
 #     # Initialize client
 #     import os
 #
 #     client = KibanaClient(
-#         {"EU": KibanaConfig(base_url=os.getenv("KIBANA_BASE_URL"),
+#         {"US": KibanaConfig(base_url=os.getenv("KIBANA_BASE_URL"),
 #                             username=os.getenv("KIBANA_USERNAME"),
 #                             password=os.getenv("KIBANA_PASSWORD"))}
 #     )
+#
+#     print(client.execute_action("generate_kibana_url", {"index_pattern": "python-logs*",
+#         "kql_query": 'model_id:"67013192-23a4-40b5-aa01-ea4cee786c1a" AND (message:*timeout* OR message:*slow* OR message:*long processing* OR message:*took* OR message:*seconds*)',
+#         "start_time": '2025-06-16T14:10:31',
+#         "end_time": '2025-06-18T14:13:22.209059'}))
     # print(client.execute_action("fetch_logs_by_kql",
     #                             {"index_pattern": "api-logs*",
     #                              "kql_query": 'level:error AND (msg:"Can\'t import files since model has been deleted" OR msg:"Hello!") AND nanonets_api_server',
