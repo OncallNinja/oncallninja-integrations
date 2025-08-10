@@ -90,6 +90,36 @@ class BitbucketClient(CodingClient):
                 print(f"Response content: {e.response.text}")
             raise
 
+    # def _make_raw_request(self, org_name: str, endpoint: str, params: Dict = None) -> str:
+    #     """
+    #     Make a raw request to the Bitbucket API.
+
+    #     Args:
+    #         endpoint: API endpoint to call (without base URL)
+    #         params: Query parameters
+    #         org_name: Repository name to determine which token to use
+
+    #     Returns:
+    #         Response text
+    #     """
+
+    #     url = endpoint if self.config.api_url in endpoint else f"{self.config.api_url}{endpoint}"
+    #     headers = self._get_headers_for_org(org_name)
+
+    #     try:
+    #         response = requests.get(
+    #             url=url,
+    #             headers=headers,
+    #             params=params
+    #         )
+    #         response.raise_for_status()
+    #         return response.text
+    #     except requests.exceptions.RequestException as e:
+    #         print(f"Error making raw request to Bitbucket API: {e}")
+    #         if hasattr(e, 'response') and hasattr(e.response, 'text'):
+    #             print(f"Response content: {e.response.text}")
+    #         raise
+
     @action(description="Lists all accessible org_names")
     def list_all_orgs(self) -> List[str]:
         """List all accessible repositories."""
@@ -613,6 +643,7 @@ class BitbucketClient(CodingClient):
 
         try:
             result = self._make_request(org_name, endpoint, data=data, method="POST")
+            print(result)
             return result.get("links", {}).get("html", {}).get("href")
         except requests.exceptions.RequestException as e:
             log.error(f"Error creating snippet: {e}")
@@ -663,6 +694,60 @@ class BitbucketClient(CodingClient):
             print(f"An unexpected error occurred: {e}")
             raise
 
+    @action(description="Gets reviewers for a diff in the repository")
+    def get_reviewers_for_diff(self, org_name: Optional[str], repo_name: str, diff_content: str) -> List[Dict[str, Any]]:
+        """Get reviewers for a diff in the repository."""
+        if "/" in repo_name:
+            org_name, repo_slug = repo_name.split("/")
+        else:
+            if not org_name:
+                raise ValueError("Workspace must be provided if repo_name doesn't include it")
+            repo_slug = repo_name
+            
+        blame_by_author = self.get_blame_from_diff(org_name, repo_name, diff_content)
+        
+        # Sort authors by the number of lines they are responsible for
+        sorted_authors = sorted(blame_by_author.items(), key=lambda item: item[1], reverse=True)
+        
+        # Return the list of authors
+        return [{"author": author, "line_count": count} for author, count in sorted_authors]
+
+    @action(description="Gets blame for a file in the repository")
+    def get_blame_for_file(self, org_name: Optional[str], repo_name: str, file_path: str, line_number: int) -> Optional[Dict[str, Any]]:
+        """Get blame for a file in the repository."""
+        if "/" in repo_name:
+            org_name, repo_slug = repo_name.split("/")
+        else:
+            if not org_name:
+                raise ValueError("Workspace must be provided if repo_name doesn't include it")
+            repo_slug = repo_name
+
+        # Get latest commit hash
+        repo_details = self.get_repository(org_name, repo_name)
+        main_branch = repo_details.get("main_branch", "main")
+        
+        url = f"/repositories/{org_name}/{repo_slug}/src/{main_branch}/{file_path}"
+        params = {"blame": "true"}
+        
+        try:
+            response = self._make_raw_request(org_name, url, params=params)
+            lines = response.splitlines()
+            if line_number <= len(lines):
+                blame_line = lines[line_number - 1]
+                import re
+                match = re.match(r'^([a-f0-9]+)', blame_line)
+                if match:
+                    commit_hash = match.group(1)
+                    # we need to get the user from the commit
+                    commit_info = self._make_request(org_name, f"/repositories/{org_name}/{repo_slug}/commit/{commit_hash}")
+                    if commit_info and 'author' in commit_info:
+                        return {'author': commit_info['author']}
+
+        except requests.exceptions.RequestException as e:
+            print(f"Error getting blame for file {file_path}: {e}")
+            
+        return None
+
     # @action(description="Searches for code in the org_name or repository")
     # def search_code_across_org(self, org_name: Optional[str], query: str) -> List[Dict[str, Any]]:
     #     """
@@ -704,17 +789,48 @@ class BitbucketClient(CodingClient):
     #         return []
 
 # Command Line Interface
-# def main():
+def main():
     # Configure the agent
-    # github_config = BitbucketConfig(
-    #     access_tokens={"horus-ai-labs": os.getenv("BITBUCKET_TOKEN")}
-    # )
+    github_config = BitbucketConfig(
+        access_tokens={"horus-ai-labs": os.getenv("BITBUCKET_TOKEN")}
+    )
 
     # Create and run the agent
-    # client = BitbucketClient(github_config)
-    # print("=====================================================================")
+    client = BitbucketClient(github_config)
+    print("=====================================================================")
     # client.execute_action("get_user_info", {"org_name": "horus-ai-labs"})
-
+    print(f'Create gist: {client.create_gist("nanonets/nanonets_api_server",
+            """
+            diff --git a/handlers/v2_1/workflow.go b/handlers/v2_1/workflow.go
+index 1a96dfd93..4144d630a 100644
+--- a/handlers/v2_1/workflow.go
++++ b/handlers/v2_1/workflow.go
+@@ -875,6 +875,24 @@ func (handler *WorkflowHandler) ExtractData(w http.ResponseWriter, r *http.Reque
+                return
+        }
+ 
++       vars := mux.Vars(r)
++       modelId := vars["id"]
++       model, _, err := handler.ModelInteractor.GetModel(r.Context(), modelId)
++       if err != nil {
++               contextLogger.WithError(err).Errorln("Error while getting model for postprocessing")
++               apiError := handlers.GetApiError(models.ERROR_MODEL_ID)
++               localizeView.RenderJson(w, r, apiError, apiError.Code)
++               return
++       }
++
++       localizationResponses, err = handler.PostprocessingInteractor.Run(r.Context(), model, localizationResponses)
++       if err != nil {
++               contextLogger.WithError(err).Errorln("Error while running postprocessing")
++               apiError := handlers.GetApiError(err)
++               localizeView.RenderJson(w, r, apiError, apiError.Code)
++               return
++       }
++
+        // TODO: Move api output structs from models to handlers
+        localizationStruct := models.ExternalLocalizationStruct{}
+        localizationStruct.Result = make([]models.ExternalLocalizationOut, len(localizationResponses))
+            ""","test changes")}')
 #     print(f'Create gist: {client.execute_action("create_gist", {"repo_name": "horus-ai-labs/DistillFlow", "diff_content": """
 # diff --git a/deploy_gcp.py b/deploy_gcp.py
 # index 8fc6bdf..2a8a301 100644
@@ -745,5 +861,5 @@ class BitbucketClient(CodingClient):
     # print("=====================================================================")
     # print(f'Read file: {client.execute_action("get_commit_diff", {"repo_name": "nanonets/nanonets_react_app", "commit_hash": "76a6d2b2820e0c0dffee8132cdff4d8e21a5b2f2"})}')
 
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    main()

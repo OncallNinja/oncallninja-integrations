@@ -3,6 +3,7 @@ import logging
 import os
 import subprocess
 from pathlib import Path
+import difflib
 
 from typing import List, Dict, Any, Optional
 
@@ -16,7 +17,11 @@ class CodingClient(ActionRouter):
         os.makedirs(work_dir, exist_ok=True)
 
     @action(description="clone the repository locally")
-    def clone_repository(self, workspace: Optional[str], repo_name: str) -> str:
+    def clone_repository(self, org_name: Optional[str], repo_name: str) -> str:
+        raise (NotImplementedError("Coding clients must implement the convert method.")
+
+   @action(description="Fetch the repo details"))
+    def get_repository(self, org_name: Optional[str], repo_name: str) -> Dict[str, Any]:
         raise NotImplementedError("Coding clients must implement the convert method.")
 
     @action(description="Lists files in a github repository")
@@ -93,12 +98,17 @@ class CodingClient(ActionRouter):
         return all_files
 
     @action(description="Gets details about the commit from the local repository")
-    def get_commit_details(self, org_name: Optional[str], repo_name: str, limit: int = 10) -> List[Dict[str, str]]:
+    def get_commit_details(self, org_name: Optional[str], repo_name: str, limit: int = 10, commit_hash: str = None) -> List[Dict[str, str]]:
         """Get recent commit details from a local repository."""
         repo_path = self.clone_repository(org_name, repo_name)
         os.chdir(repo_path)
+        
+        command = ["git", "log", f"-{limit}", "--pretty=format:%H|%an|%ad|%s"]
+        if commit_hash:
+            command.append(commit_hash)
+
         result = subprocess.run(
-            ["git", "log", f"-{limit}", "--pretty=format:%H|%an|%ad|%s"],
+            command,
             capture_output=True,
             text=True,
             check=True
@@ -121,18 +131,72 @@ class CodingClient(ActionRouter):
     @action(description="Gets diff for a commit in git diff format")
     def get_commit_diff(self, org_name: Optional[str], repo_name: str, commit_hash: str) -> str:
         """Get diff for a specific commit."""
+        repo_path = self.clone_repository(org_name, repo_name)
+        os.chdir(repo_path)
+
+        # Determine the main branch
         try:
+            repo_details = self.get_repository(org_name, repo_name)
+            main_branch = repo_details.get("main_branch")
+            if not main_branch:
+                raise ValueError(f"Could not determine main branch for {org_name}/{repo_name}.")
+        except Exception as e:
+            raise ValueError(f"Failed to get repository details to determine main branch: {e}")
+
+        def check_and_get_diff():
+            # Check if the commit is an ancestor of the main branch
+            try:
+                subprocess.run(
+                    ["git", "merge-base", "--is-ancestor", commit_hash, main_branch],
+                    check=True,
+                    capture_output=True
+                )
+            except subprocess.CalledProcessError:
+                # If the commit is not an ancestor, this command will return a non-zero exit code
+                return False
+
+            # If it is an ancestor, checkout the commit and get the diff
+            try:
+                subprocess.run(
+                    ["git", "checkout", commit_hash],
+                    check=True,
+                    capture_output=True
+                )
+                result = subprocess.run(
+                    ["git", "show", commit_hash],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                return result.stdout
+            except subprocess.CalledProcessError as e:
+                self.logger.error(f"Error during git checkout or show for commit {commit_hash}: {e.stderr.decode()}")
+                raise ValueError(f"Failed to get diff for commit {commit_hash}. Git command failed.")
+
+        try:
+            # Attempt to get diff
+            diff_output = check_and_get_diff()
+
+            if diff_output is None or diff_output is False:
+                raise ValueError(f"Commit {commit_hash} is not found on the main branch ({main_branch}).")
+
+            return diff_output
+
+        except Exception as e:
+            self.logger.error(f"Error during get_commit_diff {e}")
+            # Delete and re-clone the repository
+            import shutil
+            shutil.rmtree(repo_path, ignore_errors=True)
             repo_path = self.clone_repository(org_name, repo_name)
             os.chdir(repo_path)
-            result = subprocess.run(
-                ["git", "show", commit_hash],
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            return result.stdout
-        except Exception as e:
-            self.logger.error(f"Error while running get_commit_diff {e}")
+
+            # Re-attempt to get diff after clean clone
+            diff_output = check_and_get_diff()
+            if diff_output is False:
+                raise ValueError(f"Commit {commit_hash} is not found on the main branch ({main_branch}).")
+            elif diff_output is None:  # This case should ideally not happen if check_and_get_diff raises on error
+                raise ValueError(f"Failed to get diff for commit {commit_hash} after clean re-clone.")
+            self.logger.error(f"Error while running get_commit_diff: {e}")
             raise e
 
     @action(description="Searches for code in the given workspace and repository from the local")
@@ -186,3 +250,40 @@ class CodingClient(ActionRouter):
         except Exception as e:
             self.logger.error(f"Local search failed: {str(e)}")
             return []
+
+    @action(description="Gets blame for a diff in the repository")
+    def get_blame_from_diff(self, org_name: Optional[str], repo_name: str, diff_content: str) -> Dict[str, int]:
+        """Get blame for a diff in the repository."""
+        repo_path = self.clone_repository(org_name, repo_name)
+        os.chdir(repo_path)
+
+        blame_by_author = {}
+        
+        # Parse the diff content
+        from unidiff import PatchSet
+        patch = PatchSet(diff_content)
+
+        for patched_file in patch:
+            current_file = patched_file.path
+            for hunk in patched_file:
+                for line in hunk:
+                    if line.is_removed:
+                        line_number = line.source_line_no
+                        
+                        # Get blame for the specific line
+                        command = ['git', 'blame', '-L', f'{line_number},{line_number}', '--line-porcelain', '-e', current_file]
+                        blame_output = subprocess.run(
+                            command,
+                            capture_output=True, text=True
+                        ).stdout
+                        
+                        author_email = ""
+                        for blame_line in blame_output.splitlines():
+                            if blame_line.startswith("author-mail"):
+                                author_email = blame_line.split(" ")[1]
+                                break
+                        
+                        if author_email:
+                            blame_by_author[author_email] = blame_by_author.get(author_email, 0) + 1
+        
+        return blame_by_author
