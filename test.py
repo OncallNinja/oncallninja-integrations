@@ -34,7 +34,7 @@ from oncallninja_integrations.bitbucket import BitbucketClient, BitbucketConfig
 
 
 def test_create_pr():
-    repo_name = "horus-ai-labs/distillflow"
+    repo_name = "horus-ai-labs/Distillflow"
     config = BitbucketConfig(
         access_token=os.getenv("BITBUCKET_TOKEN_3")
     )
@@ -70,5 +70,36 @@ def test_create_pr():
         print(f"Error creating pull request: {e}")
 
 
+def test_get_reviewers_for_diff():
+    repo_name = "horus-ai-labs/DistillFlow"
+    config = BitbucketConfig(
+        access_tokens={"horus-ai-labs": os.getenv("BITBUCKET_TOKEN")}
+    )
+    client = BitbucketClient(config)
+
+    diff_content = """
+diff --git a/deploy_gcp.py b/deploy_gcp.py
+index 8fc6bdf..2a8a301 100644
+--- a/deploy_gcp.py
++++ b/deploy_gcp.py
+@@ -306,7 +306,6 @@ def main():
+     try:
+         with open(args.script_path, 'r') as f:
+             startup_script = f.read()
+-
+         print(f"Creating instance {instance_name}...")
+         create_instance(
+             project_id=args.project_id,
+"""
+    try:
+        reviewers = client.get_reviewers_for_diff(
+            org_name="horus-ai-labs",
+            repo_name="Distillflow",
+            diff_content=diff_content
+        )
+        print("Reviewers:", reviewers)
+    except Exception as e:
+        print(f"Error getting reviewers: {e}")
+
 if __name__ == "__main__":
-    test_create_pr()
+    test_get_reviewers_for_diff()
