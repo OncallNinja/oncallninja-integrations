@@ -4,10 +4,11 @@ from typing import Dict, Any, Optional, List
 from .action_router import action, ActionRouter
 
 class JiraClient(ActionRouter):
-    def __init__(self, instance_url: str, user_email: str, api_token: str):
+    def __init__(self, instance_url: str, user_email: str, api_token: str, project_key: str):
         super().__init__()
         self.instance_url = instance_url
         self.auth = (user_email, api_token)
+        self.project_key = project_key
         self.headers = {
             "Accept": "application/json",
             "Content-Type": "application/json"
@@ -48,13 +49,13 @@ class JiraClient(ActionRouter):
         return None
 
     @action(description="Creates a JIRA issue and assigns it if an assignee email is provided.")
-    def create_issue(self, project_key: str, summary: str, description: str, assignee_email: Optional[str] = None, issue_type: str = "Task") -> Dict[str, Any]:
+    def create_issue(self, summary: str, description: str, assignee_email: Optional[str] = None, issue_type: str = "Task") -> Dict[str, Any]:
         """Creates a JIRA issue and assigns it if an assignee email is provided."""
         endpoint = "/rest/api/3/issue"
         
         issue_data = {
             "fields": {
-                "project": {"key": project_key},
+                "project": {"key": self.project_key},
                 "summary": summary,
                 "description": {
                     "type": "doc",
@@ -88,6 +89,7 @@ def main():
     instance_url = os.getenv("JIRA_INSTANCE_URL")
     user_email = os.getenv("JIRA_USER_EMAIL")
     api_token =  os.getenv("JIRA_API_TOKEN")
+    project_key = "KAN"
 
     if not all([instance_url, user_email, api_token]):
         print("Please set JIRA_INSTANCE_URL, JIRA_USER_EMAIL, and JIRA_API_TOKEN environment variables.")
@@ -96,13 +98,13 @@ def main():
     jira_client = JiraClient(
         instance_url=instance_url,
         user_email=user_email,
-        api_token=api_token
+        api_token=api_token,
+        project_key=project_key
     )
 
     try:
         print("Attempting to create a test issue...")
         issue = jira_client.create_issue(
-            project_key="KAN",  # <-- IMPORTANT: Change to a valid Project Key (e.g., "PROJ"), not the full project name.
             summary="Test Issue from JiraClient",
             description="This is a test issue created from the main function in jira.py.",
             assignee_email=user_email  # Assigning to self for the test
