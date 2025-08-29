@@ -99,7 +99,7 @@ class KibanaClient(ActionRouter):
         result = self._make_request('GET', path, params=params, region=region)
         return result.get('saved_objects', [])
 
-    @action(description="KIBANA API: Get logs. Supply an index pattern, optionally start and end time, optional log_level, optional search query, and size (default set as 100). Maximum time window is 1 day.")
+    @action(description="KIBANA API: Get logs. Supply an index pattern, optionally start and end time, optional log_level, optional search query, optional match_phrase, and size (default set as 100). Maximum time window is 7 day.")
     def get_logs(
         self,
         index_pattern: str,
@@ -108,6 +108,7 @@ class KibanaClient(ActionRouter):
         field_filters: Optional[Dict[str, str]],
         log_level: Optional[str] = None,
         search_query: Optional[str] = None,
+        match_phrase: Optional[Dict[str, str]] = None,
         region = "US",
         size: int = 100,
         fields: Optional[List[str]] = None,
@@ -154,6 +155,14 @@ class KibanaClient(ActionRouter):
                 }
             })
 
+        if match_phrase:
+            for field, phrase in match_phrase.items():
+                must_conditions.append({
+                    "match_phrase": {
+                        field: phrase
+                    }
+                })
+
         if not aggregations:
             aggregations = {}
         query = {
@@ -191,7 +200,7 @@ class KibanaClient(ActionRouter):
 
     @action(description="Fetch logs using a KQL query")
     def fetch_logs_by_kql(self, index_pattern, kql_query, start_time: Optional[Union[str, datetime]],
-                          end_time: Optional[Union[str, datetime]], aggregations: Dict, region="US", size = 100):
+                          end_time: Optional[Union[str, datetime]], aggregations: Dict, match_phrase: Optional[Dict[str, str]] = None, fields: Optional[List[str]] = None, region="US", size = 100):
         """
         Fetch logs using elasticsearch-py queries.
         """
@@ -203,6 +212,16 @@ class KibanaClient(ActionRouter):
         if time_range:
             must_conditions.append({"range": {"@timestamp": time_range}})
 
+        if match_phrase:
+            for field, phrase in match_phrase.items():
+                must_conditions.append({
+                    "match_phrase": {
+                        field: phrase
+                    }
+                })
+
+        
+
         # Create the base query with query_string
         query = {
             "query": {
@@ -213,6 +232,8 @@ class KibanaClient(ActionRouter):
             "sort": [{"@timestamp": {"order": "desc"}}],
             "size": size
         }
+        if fields:
+            query["_source"] = fields
 
         if aggregations:
             query["aggs"] = aggregations
@@ -234,18 +255,45 @@ class KibanaClient(ActionRouter):
         path = f"/api/console/proxy?path={encoded_index_pattern}/_search&method=GET"
         return self._make_request('POST', path, data=query, region=region)
 
-    @action(description="KIBANA API: Validate query. Supply a kql query, and returns if the query is valid, if not, also returns the error")
-    def validate_query(self, kql: str, region="US") -> (bool, Optional[dict]):
+    @action(description="KIBANA API: Validate query. Supply a kql query, optional match_phrase, and returns if the query is valid, if not, also returns the error")
+    def validate_query(self, kql: str, match_phrase: Optional[Dict[str, str]] = None, region="US") -> (bool, Optional[dict]):
         """Validate KQL using Kibana's API"""
         try:
-            test_query = {
-                "query": {
+            # Build must conditions for the query
+            must_conditions = []
+            
+            if kql:
+                must_conditions.append({
                     "query_string": {
                         "query": kql,
                         "analyze_wildcard": True
                     }
+                })
+            
+            if match_phrase:
+                for field, phrase in match_phrase.items():
+                    must_conditions.append({
+                        "match_phrase": {
+                            field: phrase
+                        }
+                    })
+            
+            if must_conditions:
+                test_query = {
+                    "query": {
+                        "bool": {
+                            "must": must_conditions
+                        }
+                    }
                 }
-            }
+            else:
+                # If no conditions, use match_all
+                test_query = {
+                    "query": {
+                        "match_all": {}
+                    }
+                }
+                
             # Use Kibana's _validate endpoint
             response = self._make_request(
                 'POST',
@@ -264,6 +312,7 @@ class KibanaClient(ActionRouter):
             start_time: Optional[Union[str, datetime]],
             end_time: Optional[Union[str, datetime]],
             query: Optional[str] = None,
+            match_phrase: Optional[Dict[str, str]] = None,
             region = "US"
     ) -> int:
         """Get count of logs matching KQL within time range"""
@@ -284,6 +333,14 @@ class KibanaClient(ActionRouter):
                     "analyze_wildcard": True
                 }
             })
+
+        if match_phrase:
+            for field, phrase in match_phrase.items():
+                must_conditions.append({
+                    "match_phrase": {
+                        field: phrase
+                    }
+                })
 
         count_query = {
             "query": {
@@ -643,13 +700,15 @@ class KibanaClient(ActionRouter):
 
         return results
 
-    @action(description="Fetch summary.")
+    @action(description="Fetch summary. Supply an index pattern, optionally start and end time, optional match_phrase.")
     def fetch_summary(
         self,
         index_pattern: str,
         start_time: Optional[Union[str, datetime]],
         end_time: Optional[Union[str, datetime]],
         sample_size = 500,
+        kql_query: Optional[str] = None,
+        match_phrase: Optional[Dict[str, str]] = None,
         region: str = "US"
     ) -> FetchSummaryResponse:
         """
@@ -673,9 +732,39 @@ class KibanaClient(ActionRouter):
 
         time_range = util.convert_to_iso_range(start_time, end_time)
         try:
+            # Build must conditions for the query
+            must_conditions = []
+            if kql_query:
+                must_conditions.append({
+                    "query_string": {
+                        "query": kql_query,
+                        "analyze_wildcard": True
+                    }
+                })
+            if match_phrase:
+                for field, phrase in match_phrase.items():
+                    must_conditions.append({
+                        "match_phrase": {
+                            field: phrase
+                        }
+                    })
+
+            query_data = {
+                "version": True,
+                "size": sample_size,
+                "sort": [{"@timestamp": {"order": "desc", "unmapped_type": "boolean"}}],
+                "_source": {"excludes": []},
+                "aggs": {"2": {"date_histogram": {"field": "@timestamp", "calendar_interval": "1h", "time_zone": "America/Los_Angeles", "min_doc_count": 1}}},
+                "stored_fields": ["*"],
+                "script_fields": {},
+                "docvalue_fields": [{"field": "@timestamp", "format": "date_time"}, {"field": "time", "format": "date_time"}],
+                "query": {"bool": {"must": must_conditions, "filter": [{"match_all": {}}, {"range": {"@timestamp": time_range}}], "should": [], "must_not": []}},
+                "highlight": {"pre_tags": ["@kibana-highlighted-field@"], "post_tags": ["@/kibana-highlighted-field@"], "fields": {"*": {}}}
+            }
+
             encoded_index_pattern = urllib.parse.quote(index_pattern, safe='')
             path = f"/api/console/proxy?path={encoded_index_pattern}/_search&method=GET"
-            response = self._make_request('POST', path, data={"version":True,"size":sample_size,"sort":[{"@timestamp":{"order":"desc","unmapped_type":"boolean"}}],"_source":{"excludes":[]},"aggs":{"2":{"date_histogram":{"field":"@timestamp","calendar_interval":"1h","time_zone":"America/Los_Angeles","min_doc_count":1}}},"stored_fields":["*"],"script_fields":{},"docvalue_fields":[{"field":"@timestamp","format":"date_time"},{"field":"time","format":"date_time"}],"query":{"bool":{"must":[],"filter":[{"match_all":{}},{"range":{"@timestamp":time_range}}],"should":[],"must_not":[]}},"highlight":{"pre_tags":["@kibana-highlighted-field@"],"post_tags":["@/kibana-highlighted-field@"],"fields":{"*":{}}}}, region=region)
+            response = self._make_request('POST', path, data=query_data, region=region)
 
             current_field_value_map: Dict[str, Dict[str, int]] = {}
             hits_data = response.get('hits', {}).get('hits', [])
@@ -717,13 +806,14 @@ class KibanaClient(ActionRouter):
             self.logger.error(f"Error during fetch_summary for {index_pattern}: {str(e)}")
             return FetchSummaryResponse(field_value_map={}, histogram={})
 
-    @action(description="Generates a Kibana Discover URL for the given query, time range, and index pattern.")
+    @action(description="Generates a Kibana Discover URL for the given query, time range, index pattern, and optional match_phrase.")
     def generate_kibana_url(
         self,
         kql_query: str,
         start_time: str,
         end_time: str,
         index_pattern: str,
+        match_phrase: Optional[Dict[str, str]] = None,
         region: str = "US"
     ) -> str:
         """
@@ -780,17 +870,38 @@ class KibanaClient(ActionRouter):
         if not index_pattern_id:
             raise ValueError(f"Index pattern title '{index_pattern}' not found in region '{region}'.")
 
+        # Build filters array for match_phrase
+        filters_array = []
+        if match_phrase:
+            for field, phrase in match_phrase.items():
+                # Escape RISON special characters in the phrase
+                # In RISON, single quotes must be escaped as '!!' and exclamation marks as '()'
+                escaped_phrase = phrase.replace("!", "()").replace("'", "!!")
+                filter_obj = (
+                    f"('$state':(store:appState),"
+                    f"meta:(alias:!n,disabled:!f,index:'{index_pattern_id}',key:{field},negate:!f,"
+                    f"params:(query:'{escaped_phrase}'),type:phrase),"
+                    f"query:(match_phrase:({field}:'{escaped_phrase}')))"
+                )
+                filters_array.append(filter_obj)
+        
+        # Combine filters into RISON array format
+        if filters_array:
+            filters_rison = "!(" + ",".join(filters_array) + ")"
+        else:
+            filters_rison = "!()"
+
         # RISON uses single quotes for strings.
         # A single quote ' within a RISON string must be escaped as '!!'.
         # Also, an exclamation mark '!' must be escaped as '!()'.
-        # Order of replacement matters: escape '!' first, then "'".
+        # Order of replacement matters: escape '!' first, then \"'.
         escaped_kql_query = kql_query.replace("!", "!()").replace("'", "!!")
 
         g_state = f"(filters:!(),refreshInterval:(pause:!t,value:0),time:(from:'{processed_start_time_str}',to:'{processed_end_time_str}'))"
         
         a_state = (
             f"(columns:!()," 
-            f"filters:!()," 
+            f"filters:{filters_rison}," 
             f"index:'{index_pattern_id}',"
             f"interval:auto,"
             f"query:(language:kuery,query:'{escaped_kql_query}')," 
@@ -804,7 +915,7 @@ class KibanaClient(ActionRouter):
 # if __name__ == "__main__":
 #     # Initialize client
 #     import os
-#
+
 #     client = KibanaClient(
 #         {"US": KibanaConfig(base_url=os.getenv("KIBANA_BASE_URL"),
 #                             username=os.getenv("KIBANA_USERNAME"),
@@ -847,16 +958,41 @@ class KibanaClient(ActionRouter):
     #     "end_time": datetime(2025, 6, 6, 13, 45, 00, 828019)}))
     # print(client.execute_action("get_available_fields", {"index_pattern": "python-logs*", "region": "IN"}))
     # print(client.execute_action("fetch_available_field_values", {"index_pattern": "logstash*", "start_time": datetime(2025, 6, 8, 19, 34, 30, 828019), "end_time": datetime(2025, 6, 10, 13, 28, 13, 828024), "region": "IN"}))
-    # print(client.execute_action("fetch_summary", {"index_pattern": "api-logs*", "start_time": datetime(2025, 6, 8, 00, 34, 30, 828019), "end_time": datetime(2025, 6, 10, 19, 34, 13, 828024), "region": "IN"}))
+    # print(client.execute_action("fetch_summary", {"index_pattern": "api-logs*", 
+    #                                               "start_time": datetime(2025, 8, 28, 0, 00, 0, 828019), 
+    #                                               "end_time": datetime(2025, 8, 29, 0, 0, 0, 828024), 
+    #                                               "region": "US", 
+    #                                               "kql_query": "model_id:12a4b32d-7d99-11f0-9f18-5a6f5dd07fdf AND page_id:12a4b32d-7d99-11f0-9f18-5a6f5dd07fdf",
+    #                                               "match_phrase": {'request_id': 'Root=1-68b058cb-4222d4467ce8906f44477b93'}}))
+    # print(client.execute_action("fetch_logs_by_kql", {"index_pattern": "api-logs*", 
+    #                                               "start_time": datetime(2025, 8, 28, 0, 00, 0, 828019), 
+    #                                               "end_time": datetime(2025, 8, 29, 0, 0, 0, 828024), 
+    #                                               "region": "US", 
+    #                                               "kql_query": "model_id:12a4b32d-7d99-11f0-9f18-5a6f5dd07fdf AND page_id:12a4b32d-7d99-11f0-9f18-5a6f5dd07fdf",
+    #                                               "match_phrase": {'request_id': 'Root=1-68b058cb-4222d4467ce8906f44477b93'},
+    #                                               "fields": ['@timestamp', 'model_id', 'request_id']}))
+    # print(client.execute_action("get_log_count", {"index_pattern": "api-logs*", 
+    #                                               "start_time": datetime(2025, 8, 28, 0, 00, 0, 828019), 
+    #                                               "end_time": datetime(2025, 8, 29, 0, 0, 0, 828024), 
+    #                                               "region": "US", 
+    #                                               "query": "model_id:12a4b32d-7d99-11f0-9f18-5a6f5dd07fdf AND page_id:12a4b32d-7d99-11f0-9f18-5a6f5dd07fdf",
+    #                                               "match_phrase": {'request_id': 'Root=1-68b058cb-4222d4467ce8906f44477b93'}}))
+    # print(client.execute_action("generate_kibana_url", {"index_pattern": "api-logs*", 
+    #                                               "start_time": '2025-08-28T00:00:00',
+    #                                               "end_time": '2025-08-29T00:00:00',
+    #                                               "region": "US", 
+    #                                               "kql_query": "model_id:12a4b32d-7d99-11f0-9f18-5a6f5dd07fdf AND page_id:12a4b32d-7d99-11f0-9f18-5a6f5dd07fdf",
+    #                                               "match_phrase": {'request_id': 'Root=1-68b058cb-4222d4467ce8906f44477b93'}}))
     # print(client.execute_action("get_available_fields_from_sample", {"index_pattern": "python-logs*", "region": "IN"}))"2025-06-05T19:34:40.188Z","lte":"2025-06-08T19:34:40.188Z"
     # logs = client.execute_action(
     #                            "get_logs",
     #                            {"index_pattern": "api-logs*",
-    #                             "log_level": "error",
-    #                             "start_time": datetime(2025, 4, 26, 1, 28, 43, 828019),
-    #                             "end_time": datetime(2025, 4, 26, 15, 33, 13, 828024),
+    #                             "search_query": "model_id:12a4b32d-7d99-11f0-9f18-5a6f5dd07fdf AND page_id:12a4b32d-7d99-11f0-9f18-5a6f5dd07fdf",
+    #                             "match_phrase": {'request_id': 'Root=1-68b058cb-4222d4467ce8906f44477b93'},
+    #                             "start_time": datetime(2025, 8, 28, 0, 00, 0, 828019),
+    #                             "end_time": datetime(2025, 8, 29, 0, 0, 0, 828024),
     #                             "fields": ["@timestamp", "error"],
-    #                             "size": 5})
+    #                             "size": 50})
     # print(logs)
     #
     # print(f"Found {len(logs.get('data', {}).get('hits', {}).get('hits', []))} error logs")
