@@ -565,27 +565,47 @@ class BitbucketClient(CodingClient):
 
         url = f"/repositories/{org_name}/{repo_slug}/pullrequests"
 
-        # Prepare the request data
+        # Validate that branches exist before creating PR
+        try:
+            # Check if source branch exists
+            self._make_request(org_name, f"/repositories/{org_name}/{repo_slug}/refs/branches/{new_branch_name}")
+        except requests.exceptions.RequestException:
+            raise ValueError(f"Source branch '{new_branch_name}' does not exist in repository {org_name}/{repo_slug}")
+
+        try:
+            # Check if destination branch exists  
+            self._make_request(org_name, f"/repositories/{org_name}/{repo_slug}/refs/branches/{base_branch}")
+        except requests.exceptions.RequestException:
+            raise ValueError(f"Destination branch '{base_branch}' does not exist in repository {org_name}/{repo_slug}")
+
+        # Prepare the request data with proper repository references
         data = {
             "title": title,
             "description": description,
             "source": {
                 "branch": {
                     "name": new_branch_name
+                },
+                "repository": {
+                    "full_name": f"{org_name}/{repo_slug}"
                 }
             },
             "destination": {
                 "branch": {
                     "name": base_branch
+                },
+                "repository": {
+                    "full_name": f"{org_name}/{repo_slug}"
                 }
             },
             "close_source_branch": close_source_branch
         }
 
-        full_repo_name = f"{org_name}/{repo_slug}"
-
         # Make POST request to create the PR using repo-specific headers
         try:
+            log.info(f"Creating pull request: {new_branch_name} -> {base_branch} in {org_name}/{repo_slug}")
+            log.debug(f"PR payload: {data}")
+            
             result = self._make_request(org_name, url, data=data, method="POST")
 
             return {
@@ -601,9 +621,10 @@ class BitbucketClient(CodingClient):
                 "url": result.get("links", {}).get("html", {}).get("href")
             }
         except requests.exceptions.RequestException as e:
-            print(f"Error creating pull request: {e}")
+            log.error(f"Error creating pull request: {e}")
             if hasattr(e, 'response') and hasattr(e.response, 'text'):
-                print(f"Response content: {e.response.text}")
+                log.error(f"Response content: {e.response.text}")
+                log.error(f"Response status: {e.response.status_code}")
             raise
 
     @action(description="Creates a snippet (gist) in Bitbucket.")
@@ -653,14 +674,17 @@ class BitbucketClient(CodingClient):
 
     @action(description="Commits all local changes and pushes to a new Bitbucket branch")
     def commit_changes(self, org_name: Optional[str], repo_name: str,
-                        commit_message: str, new_branch_name: str, base_branch: str = "main") -> None:
+                        commit_message: str, new_branch_name: str) -> str:
         """
         Commits all local changes, creates a new branch, and pushes to that Bitbucket branch.
 
         Args:
             repo_name: The name of the repository (can be in format "org_name/repo")
             new_branch_name: The name of the new branch to create
-            base_branch: The branch to branch off from (default: main)
+            commit_message: The message for the commit.
+        
+        Returns:
+            The auto-detected base branch name.
         """
         if "/" in repo_name:
             # If full path is provided (org_name/repo)
@@ -672,7 +696,19 @@ class BitbucketClient(CodingClient):
             repo_slug = repo_name
 
         try:
-            # 1. Create new branch
+            # Auto-detect base branch
+            default_branch_info = subprocess.run(
+                ["git", "remote", "show", "origin"],
+                capture_output=True, text=True, check=True
+            )
+            base_branch = "main" # Default fallback
+            for line in default_branch_info.stdout.splitlines():
+                if "HEAD branch:" in line:
+                    base_branch = line.split(":")[-1].strip()
+                    log.info(f"Auto-detected base branch: {base_branch}")
+                    break
+            
+            # 1. Create new branch from the auto-detected base branch
             subprocess.run(["git", "checkout", "-b", new_branch_name, base_branch], check=True)
 
             # 2. Add all changes
@@ -686,6 +722,8 @@ class BitbucketClient(CodingClient):
             push_url = f"https://x-token-auth:{token}@bitbucket.org/{org_name}/{repo_slug}.git"
             subprocess.run(["git", "push", push_url, new_branch_name], check=True)
             print(f"Successfully created branch '{new_branch_name}' pushed to Bitbucket.")
+            
+            return base_branch
 
         except subprocess.CalledProcessError as e:
             print(f"Error during commit and push: {e}")
@@ -693,6 +731,141 @@ class BitbucketClient(CodingClient):
         except Exception as e:
             print(f"An unexpected error occurred: {e}")
             raise
+
+    @action(description="Applies a diff to the local repository")
+    def apply_diff(self, org_name: Optional[str], repo_name: str, diff_content: str) -> None:
+        """
+        Apply a diff to the local repository using git apply.
+        
+        Args:
+            org_name: The org_name where the repository is located
+            repo_name: The name of the repository (can be in format "org_name/repo")
+            diff_content: The diff content to apply
+        """
+        if "/" in repo_name:
+            org_name, repo_slug = repo_name.split("/")
+        else:
+            if not org_name:
+                raise ValueError("Workspace must be provided if repo_name doesn't include it")
+            repo_slug = repo_name
+
+        # Ensure we're in the repository directory
+        repo_path = os.path.join(self.config.work_dir, repo_slug)
+        if not os.path.exists(repo_path):
+            raise ValueError(f"Repository not found at {repo_path}. Please clone it first.")
+        
+        os.chdir(repo_path)
+        
+        try:
+            # Write diff to a temporary file
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.patch', delete=False) as f:
+                f.write(diff_content)
+                patch_file = f.name
+            
+            try:
+                # Try to apply the patch, ignoring index mismatches
+                subprocess.run(["git", "apply", "--check", patch_file], check=True, capture_output=True)
+                subprocess.run(["git", "apply", patch_file], check=True, capture_output=True)
+                log.info("Successfully applied diff using git apply --ignore-index")
+                
+            except subprocess.CalledProcessError as e:
+                log.warning(f"git apply failed: {e.stderr.decode()}")
+                log.info("Attempting 3-way merge...")
+                
+                try:
+                    # Try 3-way merge
+                    subprocess.run(["git", "apply", "--3way", patch_file], check=True, capture_output=True)
+                    log.info("Successfully applied diff using 3-way merge")
+                    
+                except subprocess.CalledProcessError as merge_error:
+                    log.error(f"3-way merge also failed: {merge_error.stderr.decode()}")
+                    raise ValueError(f"Failed to apply diff: {merge_error.stderr.decode()}")
+            
+            finally:
+                # Clean up temporary file
+                os.unlink(patch_file)
+                
+        except Exception as e:
+            log.error(f"Error applying diff: {e}")
+            raise
+
+    @action(description="Applies a diff to the repository, commits changes, and creates a pull request")
+    def apply_diff_and_create_pr(self, org_name: Optional[str], repo_name: str, diff_content: str,
+                                 new_branch_name: str, title: str,
+                                 description: str = "", close_source_branch: bool = False) -> Dict[str, Any]:
+        """
+        Complete workflow: apply diff, commit changes, and create pull request.
+        Uses a unique temporary directory to avoid conflicts with parallel requests.
+        
+        Args:
+            org_name: The org_name where the repository is located
+            repo_name: The name of the repository (can be in format "org_name/repo")
+            diff_content: The diff content to apply
+            new_branch_name: Name of the new branch to create
+            title: Title for the pull request (also used as commit message)
+            description: Description for the pull request
+            close_source_branch: Whether to close source branch after merge
+            
+        Returns:
+            Dictionary containing the created pull request details
+        """
+        if "/" in repo_name:
+            org_name, repo_slug = repo_name.split("/")
+        else:
+            if not org_name:
+                raise ValueError("Workspace must be provided if repo_name doesn't include it")
+            repo_slug = repo_name
+        
+        # Create a unique temporary directory for this request to avoid conflicts
+        import uuid
+        unique_id = str(uuid.uuid4())[:8]  # Use first 8 chars of UUID
+        temp_work_dir = os.path.join(self.config.work_dir, f"temp_{repo_slug}_{unique_id}")
+        
+        # Store original work_dir
+        original_work_dir = self.config.work_dir
+        
+        try:
+            os.makedirs(temp_work_dir, exist_ok=True)
+            
+            original_repo_path = self.clone_repository(org_name, repo_name)
+            
+            # Now copy the clean, up-to-date repository to temporary directory
+            temp_repo_path = os.path.join(temp_work_dir, repo_slug)
+            log.info(f"Copying repository from {original_repo_path} to {temp_repo_path}")
+            shutil.copytree(original_repo_path, temp_repo_path)
+            
+            # Now change work_dir to temp directory for subsequent operations
+            self.config.work_dir = temp_work_dir
+            
+            # Apply the diff in the temporary directory
+            self.apply_diff(org_name, repo_name, diff_content)
+            
+            # Commit and push changes, getting the auto-detected base branch
+            base_branch = self.commit_changes(org_name, repo_name, title, new_branch_name)
+            
+            # Create pull request
+            pr_result = self.create_pull_request(
+                org_name=org_name,
+                repo_name=repo_name,
+                new_branch_name=new_branch_name,
+                base_branch=base_branch,
+                title=title,
+                description=description,
+                close_source_branch=close_source_branch
+            )
+            
+            log.info(f"Successfully created PR from temporary directory: {temp_work_dir}")
+            return pr_result
+            
+        finally:
+            # Restore original work_dir
+            self.config.work_dir = original_work_dir
+            try:
+                shutil.rmtree(temp_work_dir, ignore_errors=True)
+                log.info(f"Cleaned up temporary directory: {temp_work_dir}")
+            except Exception as e:
+                log.warning(f"Failed to clean up temporary directory {temp_work_dir}: {e}")
 
     @action(description="Gets reviewers for a diff in the repository")
     def get_reviewers_for_diff(self, org_name: Optional[str], repo_name: str, diff_content: str) -> List[Dict[str, Any]]:
@@ -788,63 +961,29 @@ class BitbucketClient(CodingClient):
     #         print(f"Error searching code in Bitbucket: {e}")
     #         return []
 
-# Command Line Interface
-def main():
-    # Configure the agent
-    github_config = BitbucketConfig(
-        access_tokens={"horus-ai-labs": os.getenv("BITBUCKET_TOKEN")}
-    )
+# # Command Line Interface
+# def main():
+#     # Configure the agent
+#     github_config = BitbucketConfig(
+#         access_tokens={"horus-ai-labs": os.getenv("BITBUCKET_TOKEN")}
+#     )
 
-    # Create and run the agent
-    client = BitbucketClient(github_config)
-    print("=====================================================================")
-    # client.execute_action("get_user_info", {"org_name": "horus-ai-labs"})
-    print(f'Create gist: {client.create_gist("nanonets/nanonets_api_server",
-            """
-            diff --git a/handlers/v2_1/workflow.go b/handlers/v2_1/workflow.go
-index 1a96dfd93..4144d630a 100644
---- a/handlers/v2_1/workflow.go
-+++ b/handlers/v2_1/workflow.go
-@@ -875,6 +875,24 @@ func (handler *WorkflowHandler) ExtractData(w http.ResponseWriter, r *http.Reque
-                return
-        }
- 
-+       vars := mux.Vars(r)
-+       modelId := vars["id"]
-+       model, _, err := handler.ModelInteractor.GetModel(r.Context(), modelId)
-+       if err != nil {
-+               contextLogger.WithError(err).Errorln("Error while getting model for postprocessing")
-+               apiError := handlers.GetApiError(models.ERROR_MODEL_ID)
-+               localizeView.RenderJson(w, r, apiError, apiError.Code)
-+               return
-+       }
-+
-+       localizationResponses, err = handler.PostprocessingInteractor.Run(r.Context(), model, localizationResponses)
-+       if err != nil {
-+               contextLogger.WithError(err).Errorln("Error while running postprocessing")
-+               apiError := handlers.GetApiError(err)
-+               localizeView.RenderJson(w, r, apiError, apiError.Code)
-+               return
-+       }
-+
-        // TODO: Move api output structs from models to handlers
-        localizationStruct := models.ExternalLocalizationStruct{}
-        localizationStruct.Result = make([]models.ExternalLocalizationOut, len(localizationResponses))
-            ""","test changes")}')
-#     print(f'Create gist: {client.execute_action("create_gist", {"repo_name": "horus-ai-labs/DistillFlow", "diff_content": """
-# diff --git a/deploy_gcp.py b/deploy_gcp.py
-# index 8fc6bdf..2a8a301 100644
-# --- a/deploy_gcp.py
-# +++ b/deploy_gcp.py
-# @@ -306,7 +306,6 @@ def main():
-#      try:
-#          with open(args.script_path, 'r') as f:
-#              startup_script = f.read()
-# -
-#          print(f"Creating instance {instance_name}...")
-#          create_instance(
-#              project_id=args.project_id,""", "description": "test changes"})}')
-    print("=====================================================================")
+#     # Create and run the agent
+#     client = BitbucketClient(github_config)
+#     print("=====================================================================")
+    
+#     with open("test.patch", "r") as f:
+#         patch_content = f.read()
+
+#     print(f'Create PR: {client.execute_action("apply_diff_and_create_pr", {
+#         "org_name": "horus-ai-labs",
+#         "repo_name": "horus-ai-labs/DistillFlow",
+#         "new_branch_name": "fix-patch3",
+#         "title": "Test: Fix Patch from File",
+#         "description": "This is a test PR to confirm the patch functionality by reading from a file.",
+#         "diff_content": patch_content
+#     })}')
+#     print("=====================================================================")
     # print(f'List repos: {client.execute_action("list_repositories", {"org_name": "horus-ai-labs"})}')
     # # print("=====================================================================")
     # print(f'Get repos: {client.execute_action("get_repository", {"org_name": "horus-ai-labs", "repo_name": "DistillFlow"})}')
@@ -861,5 +1000,5 @@ index 1a96dfd93..4144d630a 100644
     # print("=====================================================================")
     # print(f'Read file: {client.execute_action("get_commit_diff", {"repo_name": "nanonets/nanonets_react_app", "commit_hash": "76a6d2b2820e0c0dffee8132cdff4d8e21a5b2f2"})}')
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()
