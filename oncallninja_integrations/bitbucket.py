@@ -31,6 +31,17 @@ class BitbucketClient(CodingClient):
         self.headers = {"Accept": "application/json", "Content-Type": "application/json"}
         os.makedirs(self.config.work_dir, exist_ok=True)
 
+    def _run_sanitized_subprocess(self, command: List[str], token_to_hide: str, **kwargs):
+        """Runs a subprocess and sanitizes the token from the error message if it fails."""
+        try:
+            return subprocess.run(command, check=True, **kwargs)
+        except subprocess.CalledProcessError as e:
+            # Sanitize the command in the exception to avoid logging the token
+            sanitized_cmd = ' '.join(e.cmd).replace(token_to_hide, '********')
+            raise subprocess.CalledProcessError(
+                e.returncode, sanitized_cmd, output=e.output, stderr=e.stderr
+            ) from e
+
     def _get_token_for_org(self, repo_name: str) -> str:
         """Get the access token for a specific repository."""
         if repo_name not in self.token_map:
@@ -405,7 +416,7 @@ class BitbucketClient(CodingClient):
 
             try:
                 # Set the remote URL with credentials before pulling
-                subprocess.run(["git", "remote", "set-url", "origin", url], check=True)
+                self._run_sanitized_subprocess(["git", "remote", "set-url", "origin", url], token)
 
                 # Check if we're in detached HEAD state or have local changes
                 head_state = subprocess.run(["git", "symbolic-ref", "--quiet", "HEAD"],
@@ -459,7 +470,7 @@ class BitbucketClient(CodingClient):
 
                     # Pull the latest changes
                     print(f"Pulling latest changes into {current_branch}...")
-                    subprocess.run(["git", "pull", "origin", current_branch], check=True)
+                    self._run_sanitized_subprocess(["git", "pull", "origin", current_branch], token)
                     print("Successfully pulled latest changes")
 
                 except subprocess.CalledProcessError as e:
@@ -496,16 +507,22 @@ class BitbucketClient(CodingClient):
                 print("Deleting and re-cloning repository...")
                 os.chdir(self.config.work_dir)
                 shutil.rmtree(local_path, ignore_errors=True)
-                subprocess.run(["git", "clone", url, local_path], check=True)
+                self._run_sanitized_subprocess(["git", "clone", url, local_path], token)
         else:
             # Clone with credentials in URL
-            subprocess.run(["git", "clone", url, local_path], check=True)
-            os.chdir(local_path)
-            # Remove credentials from recorded remote URL
-            clean_url = f"https://bitbucket.org/{org_name}/{repo_slug}.git"
-            subprocess.run(["git", "remote", "set-url", "origin", clean_url], check=True)
-            # Configure credential helper
-            subprocess.run(["git", "config", "--local", "credential.helper", "cache"], check=True)
+            try:
+                self._run_sanitized_subprocess(["git", "clone", url, local_path], token)
+                os.chdir(local_path)
+                # Remove credentials from recorded remote URL
+                clean_url = f"https://bitbucket.org/{org_name}/{repo_slug}.git"
+                subprocess.run(["git", "remote", "set-url", "origin", clean_url], check=True)
+                # Configure credential helper
+                subprocess.run(["git", "config", "--local", "credential.helper", "cache"], check=True)
+            except subprocess.CalledProcessError as e:
+                # If clone fails, it might leave an empty directory. Clean it up.
+                if os.path.exists(local_path):
+                    shutil.rmtree(local_path, ignore_errors=True)
+                raise e
 
         # --- Checkout specific commit based on timestamp ---
         if self.issue_timestamp:
@@ -720,7 +737,7 @@ class BitbucketClient(CodingClient):
             # 4. Push to the new branch
             token = self.token_map[org_name]
             push_url = f"https://x-token-auth:{token}@bitbucket.org/{org_name}/{repo_slug}.git"
-            subprocess.run(["git", "push", push_url, new_branch_name], check=True)
+            self._run_sanitized_subprocess(["git", "push", push_url, new_branch_name], token)
             print(f"Successfully created branch '{new_branch_name}' pushed to Bitbucket.")
             
             return base_branch
